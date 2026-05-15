@@ -216,3 +216,34 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AlphaCore — Project-specific ignores
+# ======================================
+
+# Environment and secrets
+*.env
+.env.*
+!.env.example
+
+# Data and model files
+data_cache/
+models_saved/*.pt
+models_saved/*.pth
+logs/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# Docker volumes
+postgres_data/
+
+# OS files
+.DS_Store
+Thumbs.db
