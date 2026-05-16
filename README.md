@@ -9,6 +9,11 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 ## Features
 
+- **Configuration & Logging** — pydantic-settings env loader, rotating file + console logging
+- **Binance Data** — OHLCV klines, live prices, account balances via Binance Testnet
+- **CoinGecko Integration** — market data, coin IDs, Fear & Greed Index
+- **CryptoPanic News** — sentiment-ready news headlines per currency
+- **Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMAs, returns, volatility
 - **ML-Powered Predictions** — LSTM and Temporal Fusion Transformer models for price forecasting
 - **Sentiment Analysis** — FinBERT-based NLP on crypto news headlines via CryptoPanic API
 - **Multi-Agent System** — LangGraph orchestrated agents for strategy, risk, execution, and monitoring
@@ -32,7 +37,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 | Crypto data | python-binance, ccxt |
 | News/sentiment | CryptoPanic API (free) |
 | On-chain data | CoinGecko API (free) |
-| Feature engineering | pandas, numpy, ta-lib |
+| Feature engineering | pandas, numpy, pandas-ta |
 | Database | SQLite (dev) → PostgreSQL (prod) |
 | API server | FastAPI |
 | Dashboard | Streamlit |
@@ -80,7 +85,7 @@ BINANCE_API_SECRET=your_testnet_api_secret
 BINANCE_TESTNET=true
 CRYPTOPANIC_API_KEY=your_cryptopanic_key
 COINGECKO_API_KEY=your_coingecko_key
-DATABASE_URL=sqlite:///./crypto_quant.db
+DATABASE_URL=sqlite:///./alphacore.db
 LOG_LEVEL=INFO
 PORTFOLIO_INITIAL_CAPITAL=10000
 MAX_POSITION_SIZE_PCT=0.05
@@ -116,8 +121,11 @@ docker-compose up --build
 The system runs a closed-loop trading cycle every hour:
 
 ```
-data_pipeline.py      → fetch latest candles + news
-feature_engineer.py   → compute technical indicators
+binance_client.py     → fetch 500 1h OHLCV candles
+coingecko_client.py   → market data + Fear & Greed Index
+cryptopanic_client.py → latest news headlines per currency
+data_pipeline.py      → orchestrates all sources + feature engineering
+feature_engineer.py   → RSI, MACD, Bollinger, ATR, EMAs, volatility
 predictor.py          → LSTM price forecast + FinBERT sentiment
 manager_agent.py      → combine signals, rank coins, set strategy
 risk_agent.py         → screen each proposed trade
@@ -149,6 +157,11 @@ autonomous-crypto-quant/
 │
 ├── src/
 │   ├── data/                  # Data fetching & feature engineering
+│   │   ├── binance_client.py      ← OHLCV, prices, account
+│   │   ├── coingecko_client.py    ← market data, Fear & Greed
+│   │   ├── cryptopanic_client.py  ← news headlines
+│   │   ├── feature_engineer.py    ← RSI, MACD, BB, ATR, EMAs
+│   │   └── data_pipeline.py       ← orchestrator
 │   ├── models/                # LSTM, TFT, FinBERT, trainers
 │   ├── agents/                # LangGraph agent system
 │   ├── database/              # SQLAlchemy ORM & CRUD
@@ -156,9 +169,12 @@ autonomous-crypto-quant/
 │   ├── dashboard/             # Streamlit UI
 │   ├── scheduler/             # APScheduler job definitions
 │   └── utils/                 # Config, logging, helpers
+│       ├── config.py              ← pydantic-settings loader
+│       ├── logger.py              ← rotating file + console
+│       └── helpers.py             ← retry, Decimal, timestamps
 │
 ├── models_saved/              # Trained model checkpoints
-├── data_cache/                # Cached OHLCV data
+├── data_cache/                # Cached OHLCV data (CSVs)
 ├── logs/                      # Rotating log files
 │
 └── tests/
@@ -172,18 +188,18 @@ autonomous-crypto-quant/
 
 ## Development Phases
 
-| Phase | Description |
-|---|---|
-| Phase 1 | Project scaffold (config, logging, dependencies) |
-| Phase 2 | Data pipeline (Binance, CoinGecko, CryptoPanic, features) |
-| Phase 3 | ML models (LSTM, TFT, FinBERT, training loop) |
-| Phase 4 | Agent system (LangGraph agents, state management) |
-| Phase 5 | Database (SQLAlchemy models, CRUD, connection) |
-| Phase 6 | API server (FastAPI routes, Pydantic schemas) |
-| Phase 7 | Dashboard (Streamlit pages, Plotly charts) |
-| Phase 8 | Scheduler (APScheduler job registry) |
-| Phase 9 | Docker deployment (Dockerfile, Compose) |
-| Phase 10 | Testing (pytest suite for all modules) |
+| Phase | Description | Status |
+|---|---|---|
+| Phase 1 | Project scaffold (config, logging, dependencies) | ✅ Complete |
+| Phase 2 | Data pipeline (Binance, CoinGecko, CryptoPanic, features) | ✅ Complete |
+| Phase 3 | ML models (LSTM, TFT, FinBERT, training loop) | ⏳ Pending |
+| Phase 4 | Agent system (LangGraph agents, state management) | ⏳ Pending |
+| Phase 5 | Database (SQLAlchemy models, CRUD, connection) | ⏳ Pending |
+| Phase 6 | API server (FastAPI routes, Pydantic schemas) | ⏳ Pending |
+| Phase 7 | Dashboard (Streamlit pages, Plotly charts) | ⏳ Pending |
+| Phase 8 | Scheduler (APScheduler job registry) | ⏳ Pending |
+| Phase 9 | Docker deployment (Dockerfile, Compose) | ⏳ Pending |
+| Phase 10 | Testing (pytest suite for all modules) | ⏳ Pending |
 
 ---
 

@@ -227,6 +227,9 @@ __marimo__/
 
 # Data and model files
 data_cache/
+*.csv
+*.parquet
+*.feather
 models_saved/*.pt
 models_saved/*.pth
 logs/
