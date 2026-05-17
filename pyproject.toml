@@ -1,7 +1,19 @@
 [project]
 name = "alphacore"
 version = "0.1.0"
-description = "Add your description here"
+description = "Autonomous Crypto Quant — multi-agent AI crypto trading system"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "python-binance>=1.0",
+    "pandas>=2.0",
+    "pandas-ta>=0.3",
+    "numpy>=1.24",
+    "requests>=2.31",
+    "torch>=2.0",
+    "transformers>=4.30",
+    "langgraph>=1.0",
+]
