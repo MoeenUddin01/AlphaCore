@@ -1,0 +1,163 @@
+"""Risk Agent — screens trade proposals through multiple risk checks.
+
+Enforces position sizing, portfolio concentration, total exposure,
+drawdown circuit breakers, and duplicate position prevention.
+Only trades that pass all checks proceed to the Execution Agent.
+"""
+
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+from src.agents.agent_state import AgentState, ProposedTrade
+from src.utils.config import settings
+from src.utils.logger import get_logger
+
+_logger = get_logger(__name__)
+
+
+class RiskAgent:
+    """Risk management agent — validates and filters trade proposals."""
+
+    def run(self, state: AgentState) -> AgentState:
+        """Screen every proposed trade through five risk checks.
+
+        Args:
+            state: Current LangGraph agent state with ``proposed_trades``.
+
+        Returns:
+            Updated state with ``approved_trades`` and ``risk_report``.
+        """
+        _logger.info("RiskAgent run — cycle %s", state["cycle_id"])
+
+        portfolio: dict[str, Any] = state.get("portfolio_summary", {})
+        total_value = float(portfolio.get("total_value", settings.PORTFOLIO_INITIAL_CAPITAL))
+        peak_value = float(portfolio.get("peak_value", total_value))
+
+        holdings_raw: Any = portfolio.get("holdings", {})
+        if isinstance(holdings_raw, dict):
+            holdings: dict[str, float] = {
+                k: float(v) if not isinstance(v, dict) else float(v.get("value", 0))
+                for k, v in holdings_raw.items()
+            }
+        elif isinstance(holdings_raw, list):
+            holdings = {
+                item.get("symbol", ""): float(item.get("value", 0))
+                for item in holdings_raw if isinstance(item, dict)
+            }
+        else:
+            holdings = {}
+
+        existing_symbols: set[str] = set()
+        for et in state.get("executed_trades", []):
+            existing_symbols.add(et.proposal.symbol)
+
+        approved: list[ProposedTrade] = []
+        rejection_reasons: list[dict[str, Any]] = []
+
+        drawdown_pct = ((peak_value - total_value) / peak_value * 100) if peak_value > 0 else 0.0
+        circuit_breaker = drawdown_pct > 15.0
+
+        if circuit_breaker:
+            _logger.warning(
+                "Circuit breaker ACTIVE — drawdown %.2f%% exceeds 15%% threshold. "
+                "All trades rejected.",
+                drawdown_pct,
+            )
+
+        for trade in state.get("proposed_trades", []):
+            if circuit_breaker:
+                rejection_reasons.append({
+                    "symbol": trade.symbol,
+                    "reason": f"Circuit breaker active: drawdown {drawdown_pct:.2f}% > 15%",
+                })
+                _logger.warning("Rejected %s (circuit breaker)", trade.symbol)
+                continue
+
+            trade_value = float(trade.quantity * trade.entry_price)
+
+            if trade_value > settings.MAX_POSITION_SIZE_PCT * total_value:
+                rejection_reasons.append({
+                    "symbol": trade.symbol,
+                    "reason": (
+                        f"Position size ${trade_value:.2f} exceeds "
+                        f"max {settings.MAX_POSITION_SIZE_PCT * 100:.0f}% "
+                        f"of portfolio (${settings.MAX_POSITION_SIZE_PCT * total_value:.2f})"
+                    ),
+                })
+                _logger.warning("Rejected %s (position size limit)", trade.symbol)
+                continue
+
+            current_coin_value = holdings.get(trade.symbol.split("/")[0], 0.0)
+            new_coin_value = current_coin_value + trade_value
+            coin_pct = new_coin_value / total_value * 100
+            if coin_pct > 20.0:
+                rejection_reasons.append({
+                    "symbol": trade.symbol,
+                    "reason": (
+                        f"Portfolio concentration {coin_pct:.2f}% exceeds 20% limit "
+                        f"(current ${current_coin_value:.2f} + proposed ${trade_value:.2f})"
+                    ),
+                })
+                _logger.warning("Rejected %s (concentration %.2f%%)", trade.symbol, coin_pct)
+                continue
+
+            existing_exposure = sum(
+                float(et.proposal.quantity * et.proposal.entry_price)
+                for et in state.get("executed_trades", [])
+            )
+            new_exposure = existing_exposure + trade_value
+            exposure_pct = new_exposure / total_value * 100
+            if exposure_pct > 80.0:
+                rejection_reasons.append({
+                    "symbol": trade.symbol,
+                    "reason": (
+                        f"Total exposure {exposure_pct:.2f}% exceeds 80% limit "
+                        f"(existing ${existing_exposure:.2f} + proposed ${trade_value:.2f})"
+                    ),
+                })
+                _logger.warning("Rejected %s (exposure %.2f%%)", trade.symbol, exposure_pct)
+                continue
+
+            if trade.side == "BUY" and trade.symbol in existing_symbols:
+                rejection_reasons.append({
+                    "symbol": trade.symbol,
+                    "reason": "Duplicate BUY position already exists for this symbol",
+                })
+                _logger.warning("Rejected %s (duplicate position)", trade.symbol)
+                continue
+
+            approved.append(trade)
+            _logger.info("Approved %s %s (qty=%s, entry=%s)", trade.side, trade.symbol, trade.quantity, trade.entry_price)
+
+        state["approved_trades"] = approved
+
+        open_value = sum(
+            float(et.proposal.quantity * et.proposal.entry_price)
+            for et in state.get("executed_trades", [])
+        )
+        approved_value = sum(float(t.quantity * t.entry_price) for t in approved)
+        portfolio_exposure_pct = ((open_value + approved_value) / total_value * 100) if total_value > 0 else 0.0
+
+        state["risk_report"] = {
+            "total_proposed": len(state.get("proposed_trades", [])),
+            "total_approved": len(approved),
+            "total_rejected": len(rejection_reasons),
+            "rejection_reasons": rejection_reasons,
+            "portfolio_exposure_pct": round(portfolio_exposure_pct, 2),
+            "drawdown_pct": round(drawdown_pct, 2),
+        }
+
+        state["cycle_log"].append(
+            f"[{datetime.utcnow().isoformat()}] RiskAgent: "
+            f"{state['risk_report']['total_approved']}/{state['risk_report']['total_proposed']} trades approved, "
+            f"exposure {portfolio_exposure_pct:.1f}%, drawdown {drawdown_pct:.1f}%"
+        )
+        _logger.info(
+            "RiskAgent done — %d/%d approved, exposure=%.1f%%, drawdown=%.1f%%",
+            len(approved),
+            len(state.get("proposed_trades", [])),
+            portfolio_exposure_pct,
+            drawdown_pct,
+        )
+        return state
