@@ -109,6 +109,8 @@ streamlit run src/dashboard/app.py
 
 Open **http://localhost:8501** for the Streamlit dashboard.
 
+> **Note:** The dashboard uses `.streamlit/config.toml` for headless mode and auto-refresh every 60 seconds. No manual configuration needed.
+
 ### Run a single trading cycle
 
 ```bash
@@ -224,7 +226,6 @@ AlphaCore/
 ├── pyproject.toml             # Dependencies (uv/pip)
 ├── docker-compose.yml
 ├── Dockerfile
-│
 ├── src/
 │   ├── data/                  # Data fetching & feature engineering
 │   │   ├── binance_client.py
