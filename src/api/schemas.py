@@ -92,6 +92,7 @@ class CycleRunResponse(BaseModel):
     executed_count: int
     portfolio_value: float
     drawdown_pct: float
+    cycle_log: list[str] | None
 
     model_config: Any = ConfigDict(from_attributes=True)
 
