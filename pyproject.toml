@@ -16,4 +16,5 @@ dependencies = [
     "torch>=2.0",
     "transformers>=4.30",
     "langgraph>=1.0",
+    "sqlalchemy>=2.0.49",
 ]
