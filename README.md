@@ -1,6 +1,6 @@
-# Autonomous Crypto Quant
+# AlphaCore — Autonomous Crypto Quant
 
-A production-grade, multi-agent AI system that predicts cryptocurrency prices using LSTM/TFT deep learning models and FinBERT NLP sentiment analysis, then autonomously manages a crypto portfolio through four specialized agents: **Manager**, **Risk**, **Execution**, and **Portfolio Monitor**.
+A production-grade, multi-agent AI system that predicts cryptocurrency prices using LSTM deep learning models and FinBERT NLP sentiment analysis, then autonomously manages a crypto portfolio through four specialized agents: **Manager**, **Risk**, **Execution**, and **Portfolio Monitor**.
 
 > **Mode:** Paper trading (Binance Testnet) — safe for real-world deployment demo.  
 > **Target assets:** BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, ADA/USDT
@@ -9,19 +9,18 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 ## Features
 
-- **Configuration & Logging** — pydantic-settings env loader, rotating file + console logging
-- **Binance Data** — OHLCV klines, live prices, account balances via Binance Testnet
-- **CoinGecko Integration** — market data, coin IDs, Fear & Greed Index
-- **CryptoPanic News** — sentiment-ready news headlines per currency
-- **Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMAs, returns, volatility
-- **ML-Powered Predictions** — LSTM and Temporal Fusion Transformer models for price forecasting
-- **Sentiment Analysis** — FinBERT-based NLP on crypto news headlines via CryptoPanic API
-- **Multi-Agent System** — LangGraph orchestrated agents for strategy, risk, execution, and monitoring
-- **Automated Trading Cycle** — Runs every 1 hour via APScheduler
-- **Real-Time Dashboard** — Streamlit UI for portfolio overview, signals, trade log, and risk metrics
-- **REST API** — FastAPI endpoints for portfolio, trade history, and ML signals
-- **Persistent Storage** — SQLite (dev) / PostgreSQL (prod) via SQLAlchemy
-- **Dockerized Deployment** — Docker Compose for one-command startup
+- **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (CryptoPanic), Fear & Greed Index
+- **Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMAs, returns, volatility via `pandas-ta`
+- **ML Price Prediction** — LSTM (PyTorch) with configurable sequence length and training loop (early stopping, checkpointing)
+- **Sentiment Analysis** — FinBERT (ProsusAI/finbert) on crypto news headlines
+- **Multi-Agent Pipeline** — LangGraph StateGraph: Manager → Risk → Execution → Portfolio Monitor
+- **Risk Management** — position sizing, concentration limits, exposure caps, drawdown circuit breaker, duplicate detection
+- **Paper Trading** — Binance Testnet integration with slippage modelling
+- **REST API** — FastAPI with 10+ endpoints for portfolio, trades, signals, health
+- **Streamlit Dashboard** — overview, ML signals, trade history, risk metrics pages with Plotly charts
+- **Persistent Storage** — SQLite via SQLAlchemy ORM (5 tables)
+- **Automated Scheduling** — APScheduler for hourly trading cycles
+- **Dockerized** — Docker Compose for one-command startup
 
 ---
 
@@ -29,22 +28,20 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 | Layer | Technology |
 |---|---|
-| Language | Python 3.11+ |
-| Deep learning | PyTorch 2.x |
+| Language | Python 3.12 |
+| Deep learning | PyTorch 2.x (CUDA 12.6) |
 | NLP model | FinBERT (ProsusAI/finbert via HuggingFace) |
-| Price model | LSTM + optional Temporal Fusion Transformer |
+| Price model | LSTM + simplified Temporal Fusion Transformer |
 | Agent framework | LangGraph 0.2+ |
-| Crypto data | python-binance, ccxt |
-| News/sentiment | CryptoPanic API (free) |
-| On-chain data | CoinGecko API (free) |
+| Crypto data | python-binance (Testnet), CoinGecko API |
+| News/sentiment | CryptoPanic API (free tier) |
 | Feature engineering | pandas, numpy, pandas-ta |
-| Database | SQLite (dev) → PostgreSQL (prod) |
-| API server | FastAPI |
-| Dashboard | Streamlit |
+| Database | SQLAlchemy ORM, SQLite (dev) |
+| API server | FastAPI + Uvicorn |
+| Dashboard | Streamlit + Plotly |
 | Task scheduler | APScheduler |
+| Package manager | uv |
 | Deployment | Docker + Docker Compose |
-| Env management | python-dotenv |
-| Testing | pytest |
 | Logging | Python logging + rotating file handler |
 
 ---
@@ -54,6 +51,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 ### Prerequisites
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Binance Testnet account ([sign up here](https://testnet.binance.vision/))
 - CryptoPanic API key ([free tier](https://cryptopanic.com/developers/api/))
 
@@ -62,14 +60,12 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 ```bash
 # Clone the repository
 git clone <repo-url>
-cd autonomous-crypto-quant
+cd AlphaCore
 
-# Create and activate virtual environment
-python -m venv .venv
+# Create virtual environment and install dependencies with uv
+uv venv
 source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
+uv sync
 
 # Copy environment file and fill in your keys
 cp .env.example .env
@@ -84,7 +80,7 @@ BINANCE_API_KEY=your_testnet_api_key
 BINANCE_API_SECRET=your_testnet_api_secret
 BINANCE_TESTNET=true
 CRYPTOPANIC_API_KEY=your_cryptopanic_key
-COINGECKO_API_KEY=your_coingecko_key
+COINGECKO_API_KEY=
 DATABASE_URL=sqlite:///./alphacore.db
 LOG_LEVEL=INFO
 PORTFOLIO_INITIAL_CAPITAL=10000
@@ -97,15 +93,48 @@ TRADING_PAIRS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,ADA/USDT
 
 ## Usage
 
+### Start the API server
+
 ```bash
-# Start the scheduler (runs trading cycle every hour)
-python -m src.scheduler.job_runner
-
-# Start the API server
 uvicorn src.api.main:app --reload
+```
 
-# Start the dashboard
+Open **http://localhost:8000/docs** for interactive API documentation (Swagger UI).
+
+### Start the Dashboard
+
+```bash
 streamlit run src/dashboard/app.py
+```
+
+Open **http://localhost:8501** for the Streamlit dashboard.
+
+### Run a single trading cycle
+
+```bash
+python -c "
+from src.data.data_pipeline import DataPipeline
+from src.agents import run_cycle
+from src.database.crud import save_cycle
+
+pipeline = DataPipeline()
+data = pipeline.run()
+state = run_cycle(data, {'cash': 10000, 'total_value': 10000})
+save_cycle(state)
+print('Cycle complete:', state['cycle_id'])
+"
+```
+
+### Start the automated scheduler
+
+```bash
+python -m src.scheduler.job_runner
+```
+
+### Run all tests
+
+```bash
+pytest tests/
 ```
 
 ### Docker
@@ -116,66 +145,138 @@ docker-compose up --build
 
 ---
 
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Welcome message |
+| `GET` | `/health` | Health check with DB status |
+| `GET` | `/portfolio/history` | Portfolio snapshot history |
+| `GET` | `/portfolio/metrics` | Aggregate performance metrics |
+| `GET` | `/portfolio/cycles` | Recent agent cycle runs |
+| `GET` | `/portfolio/positions` | Current open positions |
+| `GET` | `/trades/history` | Trade history (optional `?symbol=` filter) |
+| `GET` | `/trades/stats` | Trade statistics (counts, volume) |
+| `GET` | `/trades/{trade_id}` | Single trade by UUID |
+| `GET` | `/signals/latest` | Signals from most recent cycle |
+| `GET` | `/signals/history` | Historical signals |
+| `GET` | `/signals/summary` | Daily signal summary |
+
+---
+
+## Dashboard Pages
+
+| Page | Description |
+|---|---|
+| **Overview** | Portfolio value chart, asset allocation donut, agent status bar, Fear & Greed gauge, signal confidence chart |
+| **ML Signals** | Bullish/bearish/neutral counts, signal table with direction emojis, sentiment gauges per symbol, confidence over time |
+| **Trade History** | Stats cards, filterable trade table with coloured side column, P&L bar chart, best/worst trade |
+| **Risk Dashboard** | Drawdown, peak value, win rate, avg P&L; drawdown chart, cycle performance table, risk alert thresholds |
+
+---
+
 ## Architecture
 
 The system runs a closed-loop trading cycle every hour:
 
 ```
-binance_client.py     → fetch 500 1h OHLCV candles
-coingecko_client.py   → market data + Fear & Greed Index
-cryptopanic_client.py → latest news headlines per currency
-data_pipeline.py      → orchestrates all sources + feature engineering
-feature_engineer.py   → RSI, MACD, Bollinger, ATR, EMAs, volatility
-predictor.py          → LSTM price forecast + FinBERT sentiment
-manager_agent.py      → combine signals, rank coins, set strategy
-risk_agent.py         → screen each proposed trade
-execution_agent.py    → fire approved orders to Binance Testnet
-portfolio_monitor.py  → update P&L, check rebalance, log cycle
-database/crud.py      → persist everything to DB
+DataPipeline         → fetch candles + news + market data
+FeatureEngineer      → compute RSI, MACD, Bollinger, ATR, EMAs
+Predictor            → LSTM price forecast + FinBERT sentiment
+Manager Agent        → combine signals, rank coins, set strategy
+Risk Agent           → screen each proposed trade (5 checks)
+Execution Agent      → fire approved orders to Binance Testnet
+Portfolio Monitor    → update P&L, check rebalance, log cycle
+CRUD / Database      → persist everything to SQLite
 ```
 
 ### Agent Roles
 
-- **Manager Agent** — reads ML predictions + sentiment, ranks signals, decides strategy, delegates to Risk and Execution agents.
-- **Risk Agent** — calculates VaR, checks max drawdown, enforces position size limits, approves or rejects each proposed trade.
-- **Execution Agent** — takes approved orders, routes to Binance Testnet via python-binance, logs fills, handles slippage.
-- **Portfolio Monitor** — tracks live P&L per position, triggers rebalancing when drift > 10%, sends alerts on drawdown breach, feeds summary back to Manager Agent each cycle.
+- **Manager Agent** — reads ML predictions + sentiment, ranks signals by composite score (`confidence × 0.6 + |sentiment| × 0.4`), detects conflicts (price vs. sentiment mismatch), generates proposed trades with stop-loss and take-profit
+- **Risk Agent** — 5 independent checks: position size limit, concentration (≤20% per coin), total exposure (≤80%), drawdown circuit breaker (>15% halts trading), duplicate position prevention
+- **Execution Agent** — takes approved orders, fetches live price, models slippage (0–0.15%), routes market orders to Binance Testnet, records fill details
+- **Portfolio Monitor** — tracks live P&L per position, computes total value + drawdown from peak, triggers rebalance alerts when allocation drift > 10%
+
+---
+
+## Database Schema
+
+Five SQLAlchemy ORM tables:
+
+| Table | Key Columns |
+|---|---|
+| `cycle_runs` | `cycle_id` (UUID), signals/proposed/approved/executed counts, portfolio value, P&L, drawdown, `cycle_log` (JSON) |
+| `signals` | FK → `cycle_runs.cycle_id`, symbol, predicted return, direction, confidence, sentiment score/label, Fear & Greed |
+| `trades` | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed quantity + price, stop-loss, take-profit, status, PnL |
+| `positions` | `symbol` (unique), quantity, avg entry price, current price, unrealised PnL |
+| `portfolio_snapshots` | FK → `cycle_runs.cycle_id`, total value, cash, positions value, P&L, peak value, drawdown |
 
 ---
 
 ## Project Structure
 
 ```
-autonomous-crypto-quant/
+AlphaCore/
 ├── CLAUDE.md                  # Master context file
 ├── README.md
 ├── .env.example
 ├── .gitignore
-├── requirements.txt
+├── pyproject.toml             # Dependencies (uv/pip)
 ├── docker-compose.yml
 ├── Dockerfile
 │
 ├── src/
 │   ├── data/                  # Data fetching & feature engineering
-│   │   ├── binance_client.py      ← OHLCV, prices, account
-│   │   ├── coingecko_client.py    ← market data, Fear & Greed
-│   │   ├── cryptopanic_client.py  ← news headlines
-│   │   ├── feature_engineer.py    ← RSI, MACD, BB, ATR, EMAs
-│   │   └── data_pipeline.py       ← orchestrator
-│   ├── models/                # LSTM, TFT, FinBERT, trainers
+│   │   ├── binance_client.py
+│   │   ├── coingecko_client.py
+│   │   ├── cryptopanic_client.py
+│   │   ├── feature_engineer.py
+│   │   └── data_pipeline.py
+│   ├── models/                # ML models
+│   │   ├── lstm_model.py
+│   │   ├── tft_model.py
+│   │   ├── sentiment_model.py
+│   │   ├── trainer.py
+│   │   └── predictor.py
 │   ├── agents/                # LangGraph agent system
+│   │   ├── agent_state.py
+│   │   ├── manager_agent.py
+│   │   ├── risk_agent.py
+│   │   ├── execution_agent.py
+│   │   ├── portfolio_monitor.py
+│   │   └── __init__.py
 │   ├── database/              # SQLAlchemy ORM & CRUD
+│   │   ├── connection.py
+│   │   ├── models.py
+│   │   └── crud.py
 │   ├── api/                   # FastAPI REST endpoints
+│   │   ├── main.py
+│   │   ├── schemas.py
+│   │   └── routes/
+│   │       ├── portfolio.py
+│   │       ├── trades.py
+│   │       └── signals.py
 │   ├── dashboard/             # Streamlit UI
+│   │   ├── app.py
+│   │   ├── components/
+│   │   │   ├── metrics.py
+│   │   │   └── charts.py
+│   │   └── pages/
+│   │       ├── overview.py
+│   │       ├── signals.py
+│   │       ├── trades.py
+│   │       └── risk.py
 │   ├── scheduler/             # APScheduler job definitions
 │   └── utils/                 # Config, logging, helpers
-│       ├── config.py              ← pydantic-settings loader
-│       ├── logger.py              ← rotating file + console
-│       └── helpers.py             ← retry, Decimal, timestamps
+│       ├── config.py
+│       ├── logger.py
+│       └── helpers.py
 │
-├── models_saved/              # Trained model checkpoints
-├── data_cache/                # Cached OHLCV data (CSVs)
+├── models_saved/              # Trained model checkpoints (.pt)
+├── data_cache/                # Cached OHLCV CSVs
 ├── logs/                      # Rotating log files
+├── .streamlit/
+│   └── config.toml            # Streamlit config (headless mode)
 │
 └── tests/
     ├── test_data/
@@ -192,11 +293,11 @@ autonomous-crypto-quant/
 |---|---|---|
 | Phase 1 | Project scaffold (config, logging, dependencies) | ✅ Complete |
 | Phase 2 | Data pipeline (Binance, CoinGecko, CryptoPanic, features) | ✅ Complete |
-| Phase 3 | ML models (LSTM, TFT, FinBERT, training loop) | ⏳ Pending |
-| Phase 4 | Agent system (LangGraph agents, state management) | ⏳ Pending |
-| Phase 5 | Database (SQLAlchemy models, CRUD, connection) | ⏳ Pending |
-| Phase 6 | API server (FastAPI routes, Pydantic schemas) | ⏳ Pending |
-| Phase 7 | Dashboard (Streamlit pages, Plotly charts) | ⏳ Pending |
+| Phase 3 | ML models (LSTM, TFT, FinBERT, training loop) | ✅ Complete |
+| Phase 4 | Agent system (LangGraph agents, state management) | ✅ Complete |
+| Phase 5 | Database (SQLAlchemy models, CRUD, connection) | ✅ Complete |
+| Phase 6 | API server (FastAPI routes, Pydantic schemas) | ✅ Complete |
+| Phase 7 | Dashboard (Streamlit pages, Plotly charts) | ✅ Complete |
 | Phase 8 | Scheduler (APScheduler job registry) | ⏳ Pending |
 | Phase 9 | Docker deployment (Dockerfile, Compose) | ⏳ Pending |
 | Phase 10 | Testing (pytest suite for all modules) | ⏳ Pending |
