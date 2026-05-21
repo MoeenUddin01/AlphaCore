@@ -21,4 +21,5 @@ dependencies = [
     "uvicorn>=0.47.0",
     "streamlit-autorefresh",
     "plotly>=6.7.0",
+    "apscheduler>=3.11.2",
 ]
