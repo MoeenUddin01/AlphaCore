@@ -19,7 +19,8 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **REST API** — FastAPI with 10+ endpoints for portfolio, trades, signals, health
 - **Streamlit Dashboard** — overview, ML signals, trade history, risk metrics pages with Plotly charts
 - **Persistent Storage** — SQLite via SQLAlchemy ORM (5 tables)
-- **Automated Scheduling** — APScheduler for hourly trading cycles
+- **Automated Scheduling** — 4-mode CLI entry point: `trade` (full stack), `api` (server only), `train` (LSTM training), `dashboard` (Streamlit)
+- **Scheduler** — APScheduler with 3 recurring jobs (trading cycle, cache refresh, health check) + one-shot model training on startup
 - **Dockerized** — Docker Compose for one-command startup
 
 ---
@@ -93,25 +94,31 @@ TRADING_PAIRS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,ADA/USDT
 
 ## Usage
 
-### Start the API server
+## System Modes
+
+AlphaCore provides a single entry point with four modes:
 
 ```bash
-uvicorn src.api.main:app --reload
+# Full trading system — API server (background) + scheduler (foreground)
+python main.py --mode trade
+
+# API server only (no scheduler)
+python main.py --mode api
+
+# Train LSTM models for all trading pairs, then exit
+python main.py --mode train
+
+# Launch the Streamlit dashboard
+python main.py --mode dashboard
 ```
 
-Open **http://localhost:8000/docs** for interactive API documentation (Swagger UI).
+The default mode is `trade` — just `python main.py` starts the full system.
 
-### Start the Dashboard
+### Explore the API
 
-```bash
-streamlit run src/dashboard/app.py
-```
+When running in `trade` or `api` mode, visit **http://localhost:8000/docs** for Swagger UI.
 
-Open **http://localhost:8501** for the Streamlit dashboard.
-
-> **Note:** The dashboard uses `.streamlit/config.toml` for headless mode and auto-refresh every 60 seconds. No manual configuration needed.
-
-### Run a single trading cycle
+### Run a single trading cycle (one-off)
 
 ```bash
 python -c "
@@ -125,12 +132,6 @@ state = run_cycle(data, {'cash': 10000, 'total_value': 10000})
 save_cycle(state)
 print('Cycle complete:', state['cycle_id'])
 "
-```
-
-### Start the automated scheduler
-
-```bash
-python -m src.scheduler.job_runner
 ```
 
 ### Run all tests
@@ -224,6 +225,7 @@ AlphaCore/
 ├── .env.example
 ├── .gitignore
 ├── pyproject.toml             # Dependencies (uv/pip)
+├── main.py                    # Single entry point (4 modes)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── src/
@@ -268,6 +270,9 @@ AlphaCore/
 │   │       ├── trades.py
 │   │       └── risk.py
 │   ├── scheduler/             # APScheduler job definitions
+│   │   ├── __init__.py
+│   │   ├── job_runner.py      # SchedulerRunner class (lifecycle, signal handling)
+│   │   └── jobs.py            # 4 job functions (trading cycle, cache, health, training)
 │   └── utils/                 # Config, logging, helpers
 │       ├── config.py
 │       ├── logger.py
@@ -299,7 +304,7 @@ AlphaCore/
 | Phase 5 | Database (SQLAlchemy models, CRUD, connection) | ✅ Complete |
 | Phase 6 | API server (FastAPI routes, Pydantic schemas) | ✅ Complete |
 | Phase 7 | Dashboard (Streamlit pages, Plotly charts) | ✅ Complete |
-| Phase 8 | Scheduler (APScheduler job registry) | ⏳ Pending |
+| Phase 8 | Scheduler (APScheduler jobs, runner, main.py entry point) | ✅ Complete |
 | Phase 9 | Docker deployment (Dockerfile, Compose) | ⏳ Pending |
 | Phase 10 | Testing (pytest suite for all modules) | ⏳ Pending |
 
