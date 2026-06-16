@@ -16,8 +16,8 @@ from torch.utils.data import Dataset
 class LSTMModel(nn.Module):
     """Multi-layer LSTM with a linear output head.
 
-    Uses the last timestep's hidden state to produce a single
-    prediction (e.g. next-period price or return).
+    Uses the last timestep's hidden state to produce logits for
+    binary classification (down=0, up=1).
     """
 
     def __init__(
@@ -25,7 +25,7 @@ class LSTMModel(nn.Module):
         input_size: int = 12,
         hidden_size: int = 128,
         num_layers: int = 2,
-        output_size: int = 1,
+        output_size: int = 2,
         dropout: float = 0.2,
     ) -> None:
         """Initialise the LSTM layers and output head.
@@ -34,7 +34,7 @@ class LSTMModel(nn.Module):
             input_size: Number of features per timestep.
             hidden_size: Number of hidden units per LSTM layer.
             num_layers: Number of stacked LSTM layers.
-            output_size: Dimensionality of the prediction target.
+            output_size: Number of output classes (default 2 for up/down).
             dropout: Dropout probability applied between LSTM layers
                      (only effective when ``num_layers > 1``).
         """
@@ -55,7 +55,7 @@ class LSTMModel(nn.Module):
             x: Input tensor of shape ``(batch, sequence_length, input_size)``.
 
         Returns:
-            Prediction tensor of shape ``(batch, output_size)``.
+            Raw logits of shape ``(batch, output_size)``.
         """
         _, (hidden, _) = self.lstm(x)
         last_hidden = hidden[-1]
@@ -77,6 +77,7 @@ class LSTMDataset(Dataset):
         feature_cols: list[str],
         target_col: str,
         sequence_length: int = 24,
+        classification: bool = True,
     ) -> None:
         """Build the sequence dataset from a DataFrame.
 
@@ -85,12 +86,15 @@ class LSTMDataset(Dataset):
             feature_cols: Column names to use as model inputs.
             target_col: Column name to use as prediction target.
             sequence_length: Number of past timesteps in each sample.
+            classification: When True, target dtype is ``long`` for
+                cross-entropy loss. When False, target dtype is ``float32``.
         """
         self.features = torch.tensor(
             df[feature_cols].values, dtype=torch.float32
         )
+        target_dtype = torch.long if classification else torch.float32
         self.targets = torch.tensor(
-            df[target_col].values, dtype=torch.float32
+            df[target_col].values, dtype=target_dtype
         )
         self.sequence_length = sequence_length
 
@@ -105,10 +109,9 @@ class LSTMDataset(Dataset):
             idx: Starting index of the sequence window.
 
         Returns:
-            Tuple of ``(sequence_tensor, target_tensor)`` each as
-            ``float32``. The sequence has shape
-            ``(sequence_length, num_features)``, and the target is
-            a scalar tensor.
+            Tuple of ``(sequence_tensor, target_tensor)``. The sequence
+            has shape ``(sequence_length, num_features)``, and the target
+            is a scalar (``long`` for classification, ``float32`` for regression).
         """
         seq = self.features[idx : idx + self.sequence_length]
         tgt = self.targets[idx + self.sequence_length]
@@ -120,6 +123,7 @@ def create_sequences(
     feature_cols: list[str],
     target_col: str,
     seq_len: int = 24,
+    classification: bool = True,
 ) -> LSTMDataset:
     """Create an LSTMDataset from a DataFrame.
 
@@ -128,6 +132,7 @@ def create_sequences(
         feature_cols: Column names to use as inputs.
         target_col: Column name to use as target.
         seq_len: Number of past timesteps per sample.
+        classification: Passed through to :class:`LSTMDataset`.
 
     Returns:
         Configured :class:`LSTMDataset` instance.
@@ -137,4 +142,5 @@ def create_sequences(
         feature_cols=feature_cols,
         target_col=target_col,
         sequence_length=seq_len,
+        classification=classification,
     )

@@ -5,10 +5,14 @@ The Predictor class combines both models and exposes predict_price,
 predict_sentiment, and run_all entry points.
 """
 
+import json
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 
 from src.models.lstm_model import LSTMModel
 from src.models.sentiment_model import SentimentModel
@@ -24,26 +28,41 @@ _FEATURE_COLS = [
     "atr", "ema_20", "ema_50", "returns", "log_returns", "volatility",
 ]
 
-
 class Predictor:
-    """Aggregate interface for price and sentiment predictions."""
+    """Aggregate interface for price and sentiment predictions.
+
+    Loads one binary classification LSTM model per trading pair and
+    exposes predict_price, predict_sentiment, and run_all entry points.
+    """
 
     def __init__(self) -> None:
         _logger.info("Initialising Predictor")
-        self.model = LSTMModel(input_size=len(_FEATURE_COLS))
-        self.trainer = LSTMTrainer(model=self.model)
         self.sentiment = SentimentModel()
+        self.models: dict[str, nn.Module] = {}
+        self.scalers: dict[str, dict[str, dict[str, float]]] = {}
 
+        artifacts_dir = Path("artifacts")
         for symbol in settings.TRADING_PAIRS:
             sym = format_pair_for_binance(symbol)
-            found = self.trainer.load_checkpoint(sym)
+            model = LSTMModel(input_size=len(_FEATURE_COLS))
+            trainer = LSTMTrainer(model=model)
+            found = trainer.load_checkpoint(sym)
             if found:
-                _logger.info("Pretrained checkpoint loaded for %s", sym)
+                _logger.info("Checkpoint loaded for %s", sym)
             else:
-                _logger.warning("No pretrained checkpoint for %s — using fresh model", sym)
+                _logger.warning("No checkpoint for %s — using fresh model", sym)
+            self.models[sym] = model
+
+            scaler_path = artifacts_dir / f"scaler_{sym}.json"
+            if scaler_path.exists():
+                with open(scaler_path) as f:
+                    self.scalers[sym] = json.load(f)
+                _logger.info("Scaler loaded for %s", sym)
+            else:
+                self.scalers[sym] = {}
 
     def predict_price(self, symbol: str, feature_df: pd.DataFrame) -> dict[str, Any]:
-        """Predict the next-period return for *symbol*.
+        """Predict next-period direction for *symbol*.
 
         Args:
             symbol: Trading pair in ``BTC/USDT`` format.
@@ -51,8 +70,9 @@ class Predictor:
                 technical indicator features.
 
         Returns:
-            Dict with keys ``symbol``, ``predicted_return``,
-            ``direction`` ("up" / "down"), and ``confidence`` (0-1).
+            Dict with keys ``symbol``, ``predicted_return`` (probability
+            of "up", 0-1), ``direction`` ("up" / "down"), and ``confidence``
+            (max softmax probability, 0-1).
         """
         sym = format_pair_for_binance(symbol)
 
@@ -69,22 +89,37 @@ class Predictor:
         if len(available) < len(_FEATURE_COLS):
             _logger.warning("%s: missing feature columns: %s", sym, set(_FEATURE_COLS) - set(available))
 
-        seq = feature_df[available].iloc[-24:].values.astype("float32")
-        tensor = torch.from_numpy(seq).unsqueeze(0)
+        seq = feature_df[available].iloc[-24:].copy().astype("float32")
+        scaler = self.scalers.get(sym, {})
+        for i, col in enumerate(available):
+            if col in scaler:
+                mn = scaler[col]["min"]
+                mx = scaler[col]["max"]
+                if mx != mn:
+                    seq.iloc[:, i] = (seq.iloc[:, i] - mn) / (mx - mn)
+        tensor = torch.from_numpy(seq.values.copy()).unsqueeze(0)
 
-        self.model.eval()
+        model = self.models.get(sym)
+        if model is None:
+            return {"symbol": symbol, "predicted_return": 0.0, "direction": "neutral", "confidence": 0.0}
+
+        model.eval()
         with torch.no_grad():
-            output = self.model(tensor).squeeze().item()
+            logits = model(tensor)
+            probs = torch.softmax(logits, dim=1).squeeze(0)
 
-        predicted_return = float(output)
-        direction = "up" if predicted_return >= 0 else "down"
-        confidence = min(abs(predicted_return), 1.0)
+        prob_up = float(probs[1].item())
+        direction = "up" if prob_up >= 0.5 else "down"
+        confidence = float(probs.max().item())
 
-        _logger.info("Price prediction %s: return=%.4f direction=%s confidence=%.4f", sym, predicted_return, direction, confidence)
+        _logger.info(
+            "Price prediction %s: prob_up=%.4f direction=%s confidence=%.4f",
+            sym, prob_up, direction, confidence,
+        )
 
         return {
             "symbol": symbol,
-            "predicted_return": predicted_return,
+            "predicted_return": prob_up,
             "direction": direction,
             "confidence": confidence,
         }

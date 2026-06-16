@@ -113,3 +113,32 @@ class FeatureEngineer:
                 scalers[col] = {"min": col_min, "max": col_max}
 
         return out, scalers
+
+    @staticmethod
+    def apply_scalers(
+        df: pd.DataFrame,
+        feature_cols: list[str],
+        scalers: dict[str, dict[str, float]],
+    ) -> pd.DataFrame:
+        """Apply pre-computed min-max scalers to feature columns.
+
+        Args:
+            df: DataFrame containing the feature columns.
+            feature_cols: Column names to normalise.
+            scalers: Dict from ``normalize_features`` mapping column names
+                to ``{"min": <float>, "max": <float>}``.
+
+        Returns:
+            Normalised copy of *df*.
+        """
+        out = df.copy()
+        for col in feature_cols:
+            if col not in out.columns or col not in scalers:
+                continue
+            col_min = scalers[col]["min"]
+            col_max = scalers[col]["max"]
+            if col_max == col_min:
+                out[col] = 0.0
+            else:
+                out[col] = (out[col].astype(float) - col_min) / (col_max - col_min)
+        return out

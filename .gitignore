@@ -230,8 +230,8 @@ data_cache/
 *.csv
 *.parquet
 *.feather
-models_saved/*.pt
-models_saved/*.pth
+models_saved/
+artifacts/
 logs/
 
 # Database files

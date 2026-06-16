@@ -13,13 +13,17 @@ from torch.utils.data import DataLoader
 
 from src.models.lstm_model import LSTMModel
 from src.utils.config import settings
+from src.utils.helpers import format_pair_for_binance
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
 
 
 class LSTMTrainer:
-    """Train and evaluate an LSTMModel with early stopping and checkpointing."""
+    """Train and evaluate an LSTMModel with early stopping and checkpointing.
+
+    Uses cross-entropy loss for binary classification (up/down).
+    """
 
     def __init__(
         self,
@@ -39,7 +43,7 @@ class LSTMTrainer:
         self.optimizer: Optimizer = torch.optim.Adam(
             model.parameters(), lr=learning_rate
         )
-        self.criterion: nn.Module = nn.MSELoss()
+        self.criterion: nn.Module = nn.CrossEntropyLoss()
         self.checkpoint_dir = Path(checkpoint_dir or settings.MODEL_CHECKPOINT_DIR)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self._best_val_loss = float("inf")
@@ -75,18 +79,19 @@ class LSTMTrainer:
 
         for epoch in range(1, epochs + 1):
             train_loss = self._run_epoch(train_loader, training=True)
-            val_loss = self.evaluate(val_loader)
+            val_loss, val_acc = self.evaluate(val_loader)
 
             history["train_loss"].append(train_loss)
             history["val_loss"].append(val_loss)
 
             if epoch % 5 == 0 or epoch == 1:
                 _logger.info(
-                    "Epoch %3d/%d — train_loss: %.6f, val_loss: %.6f",
+                    "Epoch %3d/%d — train_loss: %.6f, val_loss: %.6f, val_acc: %.1f%%",
                     epoch,
                     epochs,
                     train_loss,
                     val_loss,
+                    val_acc,
                 )
 
             if val_loss < self._best_val_loss:
@@ -132,7 +137,7 @@ class LSTMTrainer:
             if training:
                 self.optimizer.zero_grad()
 
-            outputs = self.model(features).squeeze(-1)
+            outputs = self.model(features)
             loss = self.criterion(outputs, targets)
 
             if training:
@@ -144,16 +149,35 @@ class LSTMTrainer:
 
         return total_loss / max(num_batches, 1)
 
-    def evaluate(self, loader: DataLoader) -> float:
-        """Compute average loss on a DataLoader without weight updates.
+    def evaluate(self, loader: DataLoader) -> tuple[float, float]:
+        """Compute average loss and accuracy on a DataLoader.
 
         Args:
             loader: DataLoader to evaluate on.
 
         Returns:
-            Average loss value.
+            Tuple of ``(average_loss, accuracy_pct)``.
         """
-        return self._run_epoch(loader, training=False)
+        self.model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        num_batches = 0
+
+        with torch.no_grad():
+            for features, targets in loader:
+                outputs = self.model(features)
+                loss = self.criterion(outputs, targets)
+                total_loss += loss.item()
+                num_batches += 1
+
+                preds = outputs.argmax(dim=1)
+                correct += (preds == targets).sum().item()
+                total += targets.size(0)
+
+        avg_loss = total_loss / max(num_batches, 1)
+        accuracy = correct / total * 100 if total > 0 else 0.0
+        return avg_loss, accuracy
 
     def save_checkpoint(self, symbol: str, epoch: int, train_loss: float, val_loss: float) -> None:
         """Persist a model checkpoint to disk.
@@ -164,7 +188,9 @@ class LSTMTrainer:
             train_loss: Training loss at this checkpoint.
             val_loss: Validation loss at this checkpoint.
         """
-        path = self.checkpoint_dir / f"{symbol}_lstm_best.pt"
+        safe_symbol = format_pair_for_binance(symbol)
+        path = self.checkpoint_dir / f"{safe_symbol}_lstm_best.pt"
+        path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
                 "model_state_dict": self.model.state_dict(),
@@ -186,7 +212,8 @@ class LSTMTrainer:
         Returns:
             True if a checkpoint was found and loaded, False otherwise.
         """
-        path = self.checkpoint_dir / f"{symbol}_lstm_best.pt"
+        safe_symbol = format_pair_for_binance(symbol)
+        path = self.checkpoint_dir / f"{safe_symbol}_lstm_best.pt"
         if not path.exists():
             _logger.warning("No checkpoint found at %s", path)
             return False

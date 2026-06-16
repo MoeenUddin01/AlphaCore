@@ -84,13 +84,15 @@ def health_check_job() -> None:
 
 
 def run_model_training() -> None:
-    """Train LSTM models for every trading pair on startup.
+    """Train one LSTM classification model per trading pair on startup.
 
-    Runs once when the scheduler starts. For each symbol in
-    ``TRADING_PAIRS``: fetches 1000 1h candles, engineers features,
-    creates an LSTMDataset with sequence length 24, splits 80/10/10,
-    and trains for 50 epochs. Logs the final validation loss per
-    symbol.
+    Fetches 2 years of 1h candles from Yahoo Finance, engineers
+    technical features, and creates a binary classification target:
+    1 if the next candle's return is >= 0, else 0.
+    Features are min-max normalised using training-set statistics,
+    chronologically split 80/10/10, and trained for up to 50 epochs
+    with early stopping. Scaler parameters saved to ``artifacts/``
+    so the Predictor can normalise at inference time.
 
     All model imports are kept local to avoid circular imports at
     module load time.
@@ -103,15 +105,20 @@ def run_model_training() -> None:
         _logger.exception("Database initialisation failed — aborting training")
         return
 
-    try:
-        from torch.utils.data import DataLoader, random_split
+    import json
+    from pathlib import Path
 
-        from src.data.binance_client import BinanceClient
+    try:
+        import torch
+        from torch.utils.data import DataLoader
+
         from src.data.feature_engineer import FeatureEngineer
+        from src.data.yahoo_client import YahooClient
         from src.models.lstm_model import LSTMModel, create_sequences
         from src.models.trainer import LSTMTrainer
+        from src.utils.helpers import format_pair_for_binance
 
-        binance = BinanceClient()
+        yahoo = YahooClient()
         engineer = FeatureEngineer()
 
         feature_cols = [
@@ -120,41 +127,55 @@ def run_model_training() -> None:
             "atr", "ema_20", "ema_50",
             "returns", "log_returns", "volatility",
         ]
-        target_col = "close"
+        target_col = "direction"
         seq_len = 24
         batch_size = 32
+        artifacts_dir = Path("artifacts")
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        config = {
+            "feature_cols": feature_cols,
+            "target_col": target_col,
+            "seq_len": seq_len,
+            "epochs": 50,
+            "batch_size": batch_size,
+            "learning_rate": 0.001,
+        }
+        config_path = artifacts_dir / "training_config.json"
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
 
         for pair in settings.TRADING_PAIRS:
             _logger.info("Training model for %s", pair)
             try:
-                ohlcv = binance.get_ohlcv(pair, interval="1h", limit=1000)
+                ohlcv = yahoo.get_historical_ohlcv(pair, interval="1h", years=2)
                 features = engineer.compute_features(ohlcv)
+                features[target_col] = (features["close"].pct_change().shift(-1) >= 0).astype(int)
+                features = features.dropna()
 
                 if len(features) < seq_len + 10:
-                    _logger.warning(
-                        "Not enough data for %s (%d rows) — skipping",
-                        pair, len(features),
-                    )
+                    _logger.warning("Not enough data for %s (%d rows) — skipping", pair, len(features))
                     continue
 
-                dataset = create_sequences(
-                    df=features,
-                    feature_cols=feature_cols,
-                    target_col=target_col,
-                    seq_len=seq_len,
-                )
+                total = len(features)
+                train_end = int(total * 0.8)
+                val_end = int(total * 0.9)
 
-                total = len(dataset)
-                train_len = int(total * 0.8)
-                val_len = int(total * 0.1)
-                test_len = total - train_len - val_len
+                train_df = features.iloc[:train_end]
+                val_df = features.iloc[train_end:val_end]
+                test_df = features.iloc[val_end:]
 
-                train_ds, val_ds, _ = random_split(
-                    dataset, [train_len, val_len, test_len],
-                )
+                train_norm, scalers = engineer.normalize_features(train_df, feature_cols)
+                val_norm = engineer.apply_scalers(val_df, feature_cols, scalers)
+                test_norm = engineer.apply_scalers(test_df, feature_cols, scalers)
+
+                train_ds = create_sequences(train_norm, feature_cols, target_col, seq_len, classification=True)
+                val_ds = create_sequences(val_norm, feature_cols, target_col, seq_len, classification=True)
+                test_ds = create_sequences(test_norm, feature_cols, target_col, seq_len, classification=True)
 
                 train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
                 val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+                test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
                 model = LSTMModel(input_size=len(feature_cols))
                 trainer = LSTMTrainer(
@@ -169,12 +190,49 @@ def run_model_training() -> None:
                     symbol=pair,
                 )
 
-                val_losses = history.get("val_loss", [])
-                if val_losses:
-                    _logger.info(
-                        "Training complete for %s — final val loss: %.6f",
-                        pair, val_losses[-1],
-                    )
+                test_loss, test_acc = trainer.evaluate(test_loader)
+
+                sym_safe = format_pair_for_binance(pair)
+                scaler_path = artifacts_dir / f"scaler_{sym_safe}.json"
+                with open(scaler_path, "w") as f:
+                    json.dump(scalers, f, indent=2)
+
+                metrics_path = artifacts_dir / f"metrics_{sym_safe}.json"
+
+                up_c = up_t = down_c = down_t = 0
+                with torch.no_grad():
+                    for batch_f, batch_t in test_loader:
+                        preds = model(batch_f).argmax(dim=1)
+                        for p, a in zip(preds, batch_t):
+                            if a.item() == 1:
+                                up_t += 1
+                                if p.item() == a.item():
+                                    up_c += 1
+                            else:
+                                down_t += 1
+                                if p.item() == a.item():
+                                    down_c += 1
+
+                total_test = up_t + down_t
+                metrics = {
+                    "train_loss": history["train_loss"][-1] if history.get("train_loss") else 0,
+                    "val_loss": history["val_loss"][-1] if history.get("val_loss") else 0,
+                    "test_loss": test_loss,
+                    "test_accuracy_pct": round(test_acc, 2),
+                    "up_correct": up_c,
+                    "up_total": up_t,
+                    "down_correct": down_c,
+                    "down_total": down_t,
+                    "test_samples": total_test,
+                }
+                with open(metrics_path, "w") as f:
+                    json.dump(metrics, f, indent=2)
+
+                _logger.info(
+                    "Training complete for %s — val_loss=%.6f, test_loss=%.6f, test_acc=%.1f%% (%d/%d up, %d/%d down)",
+                    pair, metrics["val_loss"], test_loss, test_acc,
+                    up_c, up_t, down_c, down_t,
+                )
             except Exception:
                 _logger.exception("Training failed for %s — skipping", pair)
 
