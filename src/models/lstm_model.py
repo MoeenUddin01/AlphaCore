@@ -63,19 +63,69 @@ class LSTMModel(nn.Module):
         return out
 
 
+class LSTMClassifier(nn.Module):
+    """Multi-layer LSTM with sigmoid output for binary classification.
+
+    Identical architecture to :class:`LSTMModel` but uses a single
+    output neuron with sigmoid activation, producing a probability
+    in [0, 1]. Suitable for tasks such as volatility regime prediction
+    with BCEWithLogitsLoss.
+    """
+
+    def __init__(
+        self,
+        input_size: int = 12,
+        hidden_size: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+    ) -> None:
+        """Initialise the LSTM layers and sigmoid output head.
+
+        Args:
+            input_size: Number of features per timestep.
+            hidden_size: Number of hidden units per LSTM layer.
+            num_layers: Number of stacked LSTM layers.
+            dropout: Dropout probability applied between LSTM layers
+                     (only effective when ``num_layers > 1``).
+        """
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+        self.fc = nn.Linear(hidden_size, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through LSTM, linear head, and sigmoid.
+
+        Args:
+            x: Input tensor of shape ``(batch, sequence_length, input_size)``.
+
+        Returns:
+            Probability tensor of shape ``(batch, 1)`` with values in [0, 1].
+        """
+        _, (hidden, _) = self.lstm(x)
+        last_hidden = hidden[-1]
+        out = torch.sigmoid(self.fc(last_hidden))
+        return out
+
+
 class LSTMDataset(Dataset):
     """Sliding-window dataset for LSTM training.
 
     Each sample is a sequence of ``sequence_length`` consecutive
     feature rows paired with the target value immediately following
-    that window.
+    that window. Defaults to the ``target_vol_regime`` column.
     """
 
     def __init__(
         self,
         df: pd.DataFrame,
         feature_cols: list[str],
-        target_col: str,
+        target_col: str = "target_vol_regime",
         sequence_length: int = 24,
         classification: bool = True,
     ) -> None:
@@ -85,6 +135,8 @@ class LSTMDataset(Dataset):
             df: DataFrame containing feature and target columns.
             feature_cols: Column names to use as model inputs.
             target_col: Column name to use as prediction target.
+                Defaults to ``target_vol_regime``. Pass ``returns``
+                to use the old return-based target.
             sequence_length: Number of past timesteps in each sample.
             classification: When True, target dtype is ``long`` for
                 cross-entropy loss. When False, target dtype is ``float32``.
@@ -121,7 +173,7 @@ class LSTMDataset(Dataset):
 def create_sequences(
     df: pd.DataFrame,
     feature_cols: list[str],
-    target_col: str,
+    target_col: str = "target_vol_regime",
     seq_len: int = 24,
     classification: bool = True,
 ) -> LSTMDataset:
@@ -130,7 +182,8 @@ def create_sequences(
     Args:
         df: DataFrame with feature and target columns.
         feature_cols: Column names to use as inputs.
-        target_col: Column name to use as target.
+        target_col: Column name to use as target. Defaults to
+            ``target_vol_regime``.
         seq_len: Number of past timesteps per sample.
         classification: Passed through to :class:`LSTMDataset`.
 

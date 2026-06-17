@@ -16,7 +16,13 @@ _logger = get_logger(__name__)
 class FeatureEngineer:
     """Computes and normalises technical indicators from OHLCV data."""
 
-    def compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def compute_features(
+        self,
+        df: pd.DataFrame,
+        funding_rate: float = 0.0,
+        open_interest: float = 0.0,
+        fear_greed: int = 50,
+    ) -> pd.DataFrame:
         """Enrich an OHLCV DataFrame with technical indicator columns.
 
         Expects at minimum columns ``close``, ``high``, ``low``.
@@ -25,9 +31,16 @@ class FeatureEngineer:
         Args:
             df: Raw OHLCV DataFrame with ``open``, ``high``, ``low``,
                 ``close``, ``volume`` columns.
+            funding_rate: Perpetual futures funding rate (added as constant
+                column ``funding_rate``).
+            open_interest: Open interest in base asset (normalised to billions
+                as ``open_interest_normalized``).
+            fear_greed: Fear & Greed index 0-100 (normalised to 0-1 as
+                ``fear_greed_normalized``).
 
         Returns:
-            DataFrame with all original columns plus new indicator columns.
+            DataFrame with all original columns plus new indicator columns,
+            including a ``target_vol_regime`` column.
         """
         _logger.info("Computing technical features on %d rows", len(df))
         out = df.copy()
@@ -36,6 +49,10 @@ class FeatureEngineer:
         for col in numeric_cols:
             if col in out.columns:
                 out[col] = out[col].astype(float)
+
+        out["funding_rate"] = funding_rate
+        out["open_interest_normalized"] = open_interest / 1e9
+        out["fear_greed_normalized"] = fear_greed / 100.0
 
         out["rsi"] = ta.rsi(out["close"], length=14)
 
@@ -76,6 +93,42 @@ class FeatureEngineer:
             after,
         )
 
+        out = self.add_volatility_regime_target(out, window=4)
+
+        return out
+
+    @staticmethod
+    def add_volatility_regime_target(df: pd.DataFrame, window: int = 4) -> pd.DataFrame:
+        """Add a binary volatility regime target column.
+
+        The target is 1 if the maximum price range over the next
+        ``window`` candles exceeds the rolling 24-candle median
+        price range, else 0. The target is shifted by 1 to prevent
+        lookahead bias.
+
+        Args:
+            df: DataFrame with ``high`` and ``low`` columns.
+            window: Number of lookahead candles to compute max range.
+
+        Returns:
+            Copy of *df* with an added ``target_vol_regime`` column
+            (``int``, 0 or 1).
+        """
+        out = df.copy()
+        price_range = out["high"] - out["low"]
+        rolling_median_range = price_range.rolling(24).median()
+        future_max_range = price_range.rolling(window).max().shift(-window)
+        out["target_vol_regime"] = (
+            (future_max_range > rolling_median_range).astype(int).shift(1)
+        )
+        dropped = out["target_vol_regime"].isna().sum()
+        out = out.dropna(subset=["target_vol_regime"])
+        zeros = int((out["target_vol_regime"] == 0).sum())
+        ones = int((out["target_vol_regime"] == 1).sum())
+        _logger.info(
+            "Volatility regime target — %d zeros, %d ones (%d NaN rows dropped)",
+            zeros, ones, dropped,
+        )
         return out
 
     @staticmethod

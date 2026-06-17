@@ -15,6 +15,8 @@ from src.utils.config import settings
 from src.utils.helpers import format_pair_for_binance, retry_with_backoff, timestamp_to_datetime
 from src.utils.logger import get_logger
 
+_FUTURES_ERROR_MSG = "pair is not a valid futures symbol"
+
 _logger = get_logger(__name__)
 
 _INTERVAL_MS = {
@@ -199,3 +201,69 @@ class BinanceClient:
                 balances[bal["asset"]] = free
 
         return balances
+
+    @retry_with_backoff
+    def get_funding_rate(self, pair: str) -> dict:
+        """Fetch the latest futures funding rate for *pair*.
+
+        Args:
+            pair: Trading pair in ``BTC/USDT`` format.
+
+        Returns:
+            Dict with keys ``funding_rate`` (Decimal) and
+            ``next_funding_time`` (datetime or ``None``).
+            Returns zero values with a warning if the pair is not a
+            valid futures symbol.
+        """
+        sym = format_pair_for_binance(pair)
+        _logger.info("Fetching funding rate for %s", sym)
+        try:
+            data = self._client.futures_funding_rate(symbol=sym, limit=1)
+            if not data:
+                _logger.warning("Empty funding rate response for %s", sym)
+                return {"funding_rate": Decimal("0"), "next_funding_time": None}
+            entry = data[0]
+            rate = Decimal(entry.get("fundingRate", "0"))
+            funding_time_ms = entry.get("fundingTime")
+            next_time = timestamp_to_datetime(int(funding_time_ms)) if funding_time_ms else None
+            _logger.info("Funding rate for %s: rate=%s, next_time=%s", sym, rate, next_time)
+            return {"funding_rate": rate, "next_funding_time": next_time}
+        except BinanceAPIException as exc:
+            _logger.warning("%s — %s", _FUTURES_ERROR_MSG, exc)
+            return {"funding_rate": Decimal("0"), "next_funding_time": None}
+        except Exception as exc:
+            _logger.warning("%s — %s", _FUTURES_ERROR_MSG, exc)
+            return {"funding_rate": Decimal("0"), "next_funding_time": None}
+
+    @retry_with_backoff
+    def get_open_interest(self, pair: str) -> dict:
+        """Fetch the latest futures open interest for *pair*.
+
+        Args:
+            pair: Trading pair in ``BTC/USDT`` format.
+
+        Returns:
+            Dict with keys ``open_interest`` (Decimal, quantity in base
+            asset) and ``open_interest_value`` (Decimal, USDT notional
+            value computed from the current spot price).
+            Returns zero values with a warning if the pair is not a
+            valid futures symbol.
+        """
+        sym = format_pair_for_binance(pair)
+        _logger.info("Fetching open interest for %s", sym)
+        try:
+            data = self._client.futures_open_interest(symbol=sym)
+            oi = Decimal(data.get("openInterest", "0"))
+            price = self.get_current_price(pair)
+            oi_value = oi * price
+            _logger.info(
+                "Open interest for %s: oi=%s, oi_value=%s, price=%s",
+                sym, oi, oi_value, price,
+            )
+            return {"open_interest": oi, "open_interest_value": oi_value}
+        except BinanceAPIException as exc:
+            _logger.warning("%s — %s", _FUTURES_ERROR_MSG, exc)
+            return {"open_interest": Decimal("0"), "open_interest_value": Decimal("0")}
+        except Exception as exc:
+            _logger.warning("%s — %s", _FUTURES_ERROR_MSG, exc)
+            return {"open_interest": Decimal("0"), "open_interest_value": Decimal("0")}
