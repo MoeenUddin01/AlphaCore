@@ -43,6 +43,9 @@ class Signal:
     timestamp: datetime
     """When this signal was generated (UTC)."""
 
+    vol_regime: int = 0
+    """Volatility regime — ``0`` (low) or ``1`` (high). Defaults to low."""
+
 
 @dataclass
 class ProposedTrade:
