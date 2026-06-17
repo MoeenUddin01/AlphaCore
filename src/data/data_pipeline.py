@@ -69,14 +69,15 @@ class DataPipeline:
 
             try:
                 ohlcv = self.binance.get_ohlcv(pair, interval="1h", limit=500)
-                features = self.feature_engineer.compute_features(ohlcv)
-                pair_data["ohlcv_features"] = features
             except Exception as exc:
-                _logger.error("OHLCV / features failed for %s: %s", pair, exc)
+                _logger.error("OHLCV fetch failed for %s: %s", pair, exc)
                 pair_data["ohlcv_features"] = pd.DataFrame()
                 pair_data["current_price"] = Decimal("0")
                 pair_data["market_data"] = {}
                 pair_data["news"] = []
+                pair_data["funding_rate"] = Decimal("0")
+                pair_data["open_interest"] = Decimal("0")
+                pair_data["fear_greed_value"] = fear_greed.get("value", 50)
                 pair_data["fear_greed"] = fear_greed
                 result[pair] = pair_data
                 continue
@@ -104,16 +105,50 @@ class DataPipeline:
                 _logger.error("News fetch failed for %s: %s", pair, exc)
                 pair_data["news"] = []
 
+            try:
+                funding_data = self.binance.get_funding_rate(pair)
+                pair_data["funding_rate"] = funding_data.get("funding_rate", Decimal("0"))
+                _logger.info("Funding rate for %s: %s", pair, pair_data["funding_rate"])
+            except Exception as exc:
+                _logger.error("Funding rate fetch failed for %s: %s", pair, exc)
+                pair_data["funding_rate"] = Decimal("0")
+
+            try:
+                oi_data = self.binance.get_open_interest(pair)
+                pair_data["open_interest"] = oi_data.get("open_interest", Decimal("0"))
+                _logger.info("Open interest for %s: %s", pair, pair_data["open_interest"])
+            except Exception as exc:
+                _logger.error("Open interest fetch failed for %s: %s", pair, exc)
+                pair_data["open_interest"] = Decimal("0")
+
+            pair_data["fear_greed_value"] = fear_greed.get("value", 50)
             pair_data["fear_greed"] = fear_greed
+
+            try:
+                features = self.feature_engineer.compute_features(
+                    ohlcv,
+                    funding_rate=float(pair_data["funding_rate"]),
+                    open_interest=float(pair_data["open_interest"]),
+                    fear_greed=pair_data["fear_greed_value"],
+                )
+                pair_data["ohlcv_features"] = features
+                _logger.info(
+                    "Feature columns for %s: %d columns — %s",
+                    pair, len(features.columns), list(features.columns),
+                )
+            except Exception as exc:
+                _logger.error("Feature computation failed for %s: %s", pair, exc)
+                pair_data["ohlcv_features"] = pd.DataFrame()
 
             result[pair] = pair_data
 
-            cache_path = self._cache_dir / f"{format_pair_for_binance(pair)}.csv"
-            try:
-                features.to_csv(cache_path, index=False)
-                _logger.info("Cached OHLCV features to %s", cache_path)
-            except Exception as exc:
-                _logger.error("Failed to cache %s: %s", cache_path, exc)
+            if "ohlcv_features" in pair_data and not pair_data["ohlcv_features"].empty:
+                cache_path = self._cache_dir / f"{format_pair_for_binance(pair)}.csv"
+                try:
+                    pair_data["ohlcv_features"].to_csv(cache_path, index=False)
+                    _logger.info("Cached OHLCV features to %s", cache_path)
+                except Exception as exc:
+                    _logger.error("Failed to cache %s: %s", cache_path, exc)
 
         _logger.info("Data pipeline run complete — processed %d pair(s)", len(result))
         return result

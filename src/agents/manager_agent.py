@@ -17,6 +17,9 @@ from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
 
+MIN_CONFIDENCE_THRESHOLD = 0.55
+MIN_SENTIMENT_STRENGTH = 0.30
+
 
 class ManagerAgent:
     """Strategy and delegation agent — generates ranked trade proposals."""
@@ -64,6 +67,7 @@ class ManagerAgent:
             else:
                 sentiment_label = "neutral"
 
+            vol_regime = preds.get("vol_regime", {})
             signal = Signal(
                 symbol=pair,
                 predicted_return=float(price.get("predicted_return", 0.0)),
@@ -71,6 +75,7 @@ class ManagerAgent:
                 confidence=float(price.get("confidence", 0.0)),
                 sentiment_score=float(sentiment.get("composite_score", 0.0)),
                 sentiment_label=sentiment_label,
+                vol_regime=int(vol_regime.get("vol_regime", 0)),
                 fear_greed_value=fng_value,
                 timestamp=state["timestamp"],
             )
@@ -94,6 +99,18 @@ class ManagerAgent:
 
         proposed_trades: list[ProposedTrade] = []
         for sig in top_signals:
+            if sig.confidence < MIN_CONFIDENCE_THRESHOLD:
+                _logger.info(
+                    "%s skipped — confidence %.2f below threshold %.2f",
+                    sig.symbol, sig.confidence, MIN_CONFIDENCE_THRESHOLD,
+                )
+                continue
+            if abs(sig.sentiment_score) < MIN_SENTIMENT_STRENGTH:
+                _logger.info(
+                    "%s skipped — sentiment strength %.2f below threshold %.2f",
+                    sig.symbol, abs(sig.sentiment_score), MIN_SENTIMENT_STRENGTH,
+                )
+                continue
             trade = self._signal_to_trade(sig, portfolio_value, state)
             if trade is not None:
                 proposed_trades.append(trade)
@@ -157,6 +174,14 @@ class ManagerAgent:
         position_size = max_position * Decimal(str(portfolio_value))
         quantity = (position_size / entry_price).quantize(Decimal("0.00001"))
 
+        vol_regime = getattr(sig, "vol_regime", 0)
+        if vol_regime == 1:
+            quantity = (quantity / Decimal("2")).quantize(Decimal("0.00001"))
+            _logger.info(
+                "%s high volatility regime — position halved to %s",
+                sig.symbol, quantity,
+            )
+
         score = (sig.confidence * 0.6) + (abs(sig.sentiment_score) * 0.4)
 
         sl_pct = Decimal(str(settings.STOP_LOSS_PCT))
@@ -167,6 +192,8 @@ class ManagerAgent:
             f"Signal score={score:.4f}, direction={direction}, "
             f"confidence={sig.confidence:.4f}, sentiment={sig.sentiment_score:.4f}"
         )
+        if vol_regime == 1:
+            reasoning += " [HIGH VOL: position halved]"
 
         trade = ProposedTrade(
             symbol=sig.symbol,
