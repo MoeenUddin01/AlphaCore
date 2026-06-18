@@ -9,11 +9,14 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 ## Features
 
-- **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (CryptoPanic), Fear & Greed Index
+- **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (CryptoPanic), Fear & Greed Index, **funding rate**, **open interest**
 - **Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMAs, returns, volatility via `pandas-ta`
-- **ML Price Prediction** — LSTM (PyTorch) with configurable sequence length and training loop (early stopping, checkpointing)
+- **Two ML Models Per Symbol** — `LSTMModel` for price direction (2-class, ~50% acc) and `LSTMClassifier` for volatility regime (sigmoid, ~83% acc)
+- **Volatility Regime Prediction** — binary target from 4-candle price range vs 24-candle median; BCE loss, saves `_classifier_best.pt` checkpoints
+- **Confidence Scoring** — combined score: `direction_conf × 0.4 + vol_prob × 0.3 + |sentiment| × 0.3`
 - **Sentiment Analysis** — FinBERT (ProsusAI/finbert) on crypto news headlines
 - **Multi-Agent Pipeline** — LangGraph StateGraph: Manager → Risk → Execution → Portfolio Monitor
+- **Manager Agent Filtering** — configurable `MIN_CONFIDENCE_THRESHOLD` (0.55) and `MIN_SENTIMENT_STRENGTH` (0.30); position halved in high-volatility regime
 - **Risk Management** — position sizing, concentration limits, exposure caps, drawdown circuit breaker, duplicate detection
 - **Paper Trading** — Binance Testnet integration with slippage modelling
 - **REST API** — FastAPI with 10+ endpoints for portfolio, trades, signals, health
@@ -21,6 +24,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **Persistent Storage** — SQLite via SQLAlchemy ORM (5 tables)
 - **Automated Scheduling** — 4-mode CLI entry point: `trade` (full stack), `api` (server only), `train` (LSTM training), `dashboard` (Streamlit)
 - **Scheduler** — APScheduler with 3 recurring jobs (trading cycle, cache refresh, health check) + one-shot model training on startup
+- **Training Data** — 2 years of 1h OHLCV via Yahoo Finance (free, no API key); Binance Futures for funding rate / open interest
 - **Dockerized** — Docker Compose for one-command startup
 
 ---
@@ -32,7 +36,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 | Language | Python 3.12 |
 | Deep learning | PyTorch 2.x (CUDA 12.6) |
 | NLP model | FinBERT (ProsusAI/finbert via HuggingFace) |
-| Price model | LSTM + simplified Temporal Fusion Transformer |
+| Price model | LSTM (direction) + LSTMClassifier (volatility regime) |
 | Agent framework | LangGraph 0.2+ |
 | Crypto data | python-binance (Testnet), CoinGecko API |
 | News/sentiment | CryptoPanic API (free tier) |
@@ -183,10 +187,10 @@ docker-compose up --build
 The system runs a closed-loop trading cycle every hour:
 
 ```
-DataPipeline         → fetch candles + news + market data
-FeatureEngineer      → compute RSI, MACD, Bollinger, ATR, EMAs
-Predictor            → LSTM price forecast + FinBERT sentiment
-Manager Agent        → combine signals, rank coins, set strategy
+DataPipeline         → fetch candles + news + market data + funding rate + open interest
+FeatureEngineer      → compute indicators + volatility regime target (target_vol_regime)
+Predictor            → LSTM direction (2-class) + LSTMClassifier vol regime (sigmoid) + FinBERT sentiment
+Manager Agent        → combine signals, rank coins, filter (confidence ≥ 0.55, |sentiment| ≥ 0.30), halve position on high vol
 Risk Agent           → screen each proposed trade (5 checks)
 Execution Agent      → fire approved orders to Binance Testnet
 Portfolio Monitor    → update P&L, check rebalance, log cycle
@@ -195,7 +199,7 @@ CRUD / Database      → persist everything to SQLite
 
 ### Agent Roles
 
-- **Manager Agent** — reads ML predictions + sentiment, ranks signals by composite score (`confidence × 0.6 + |sentiment| × 0.4`), detects conflicts (price vs. sentiment mismatch), generates proposed trades with stop-loss and take-profit
+- **Manager Agent** — reads ML predictions + sentiment + volatility regime, ranks signals by composite score (`confidence × 0.6 + |sentiment| × 0.4`), detects conflicts (price vs. sentiment mismatch), filters out weak signals (`MIN_CONFIDENCE_THRESHOLD=0.55`, `MIN_SENTIMENT_STRENGTH=0.30`), halves position size in high-volatility regime, generates proposed trades with stop-loss and take-profit
 - **Risk Agent** — 5 independent checks: position size limit, concentration (≤20% per coin), total exposure (≤80%), drawdown circuit breaker (>15% halts trading), duplicate position prevention
 - **Execution Agent** — takes approved orders, fetches live price, models slippage (0–0.15%), routes market orders to Binance Testnet, records fill details
 - **Portfolio Monitor** — tracks live P&L per position, computes total value + drawdown from peak, triggers rebalance alerts when allocation drift > 10%
@@ -278,7 +282,8 @@ AlphaCore/
 │       ├── logger.py
 │       └── helpers.py
 │
-├── models_saved/              # Trained model checkpoints (.pt)
+├── models_saved/              # Trained model checkpoints ({sym}_lstm_best.pt, {sym}_classifier_best.pt)
+├── artifacts/                 # Scaler params + training config + per-symbol metrics JSON
 ├── data_cache/                # Cached OHLCV CSVs
 ├── logs/                      # Rotating log files
 ├── .streamlit/
@@ -304,7 +309,7 @@ AlphaCore/
 | Phase 5 | Database (SQLAlchemy models, CRUD, connection) | ✅ Complete |
 | Phase 6 | API server (FastAPI routes, Pydantic schemas) | ✅ Complete |
 | Phase 7 | Dashboard (Streamlit pages, Plotly charts) | ✅ Complete |
-| Phase 8 | Scheduler (APScheduler jobs, runner, main.py entry point) | ✅ Complete |
+| Phase 8 | Scheduler + dual-model training (direction + vol regime, Yahoo Finance data, manager filters) | ✅ Complete |
 | Phase 9 | Docker deployment (Dockerfile, Compose) | ⏳ Pending |
 | Phase 10 | Testing (pytest suite for all modules) | ⏳ Pending |
 
