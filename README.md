@@ -14,14 +14,19 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **Two ML Models Per Symbol** — `LSTMModel` for price direction (2-class, ~50% acc) and `LSTMClassifier` for volatility regime (sigmoid, ~83% acc)
 - **Volatility Regime Prediction** — binary target from 4-candle price range vs 24-candle median; BCE loss, saves `_classifier_best.pt` checkpoints
 - **Confidence Scoring** — combined score: `direction_conf × 0.4 + vol_prob × 0.3 + |sentiment| × 0.3`
-- **Sentiment Analysis** — FinBERT (ProsusAI/finbert) on crypto news headlines
+- **Sentiment Analysis** — FinBERT (ProsusAI/finbert) with **time-decay weighting** — fresher headlines contribute more via linear decay over 24h (10% floor); `avg_headline_age_hours` logged per headline batch
 - **Multi-Agent Pipeline** — LangGraph StateGraph: Manager → Risk → Execution → Portfolio Monitor
-- **Manager Agent Filtering** — configurable `MIN_CONFIDENCE_THRESHOLD` (0.55) and `MIN_SENTIMENT_STRENGTH` (0.30); position halved in high-volatility regime
-- **Risk Management** — position sizing, concentration limits, exposure caps, drawdown circuit breaker, duplicate detection
+- **Manager Agent (Option A)** — sentiment-primary trading; side determined solely by `abs(sentiment_score)` thresholds (`>0.30 BUY`, `<-0.30 SELL`); LSTM direction logged for research only; position halved in high-volatility regime; **paused mode** check skips new entry proposals when `data_cache/.trading_paused` flag exists
+- **Risk Management** — position sizing, concentration limits (≤20% per coin), total exposure caps (≤80%), drawdown circuit breaker (>15%), duplicate prevention, **correlation risk** (≥3 same-direction positions halves quantity, ≥4 rejects)
+- **Auto-Exit Monitoring** — `PortfolioMonitor.check_exit_conditions()` checks every open position against SL/TP from DB each cycle; generates `ProposedTrade` with `is_auto_exit=True` that bypasses all risk checks
+- **Real Trading Fees** — `TRADING_FEE_PCT=0.001` (0.1%) deducted from realised P&L on both entry and exit legs; `fee_paid` persisted on `ExecutedTrade` and `Trade` DB table
+- **Idempotency Lock** — file-based `FileLock` on `data_cache/.trading_cycle.lock` (5s timeout) prevents double execution when scheduler fires overlapping cycles
+- **Kill Switch** — `POST /portfolio/pause-trading` writes a flag file; `POST /portfolio/resume-trading` deletes it; Streamlit sidebar buttons; Manager Agent reads flag each cycle and skips new entry trades while allowing SL/TP exits
 - **Paper Trading** — Binance Testnet integration with slippage modelling
-- **REST API** — FastAPI with 10+ endpoints for portfolio, trades, signals, health
-- **Streamlit Dashboard** — overview, ML signals, trade history, risk metrics pages with Plotly charts
-- **Persistent Storage** — SQLite via SQLAlchemy ORM (5 tables)
+- **REST API** — FastAPI with 15+ endpoints for portfolio, trades, signals, health, **sentiment validation**, **pause/resume**
+- **Streamlit Dashboard** — overview, ML signals, trade history, risk metrics, **sentiment validation** pages with Plotly charts
+- **Persistent Storage** — SQLite via SQLAlchemy ORM (5 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid` columns on `Trade`
+- **Sentiment Validation Dashboard** — win-rate color-coded metric, sample-size progress bar, win/loss sentiment comparison chart, statistical readiness gate (requires ≥30 trades)
 - **Automated Scheduling** — 4-mode CLI entry point: `trade` (full stack), `api` (server only), `train` (LSTM training), `dashboard` (Streamlit)
 - **Scheduler** — APScheduler with 3 recurring jobs (trading cycle, cache refresh, health check) + one-shot model training on startup
 - **Training Data** — 2 years of 1h OHLCV via Yahoo Finance (free, no API key); Binance Futures for funding rate / open interest
@@ -91,6 +96,8 @@ LOG_LEVEL=INFO
 PORTFOLIO_INITIAL_CAPITAL=10000
 MAX_POSITION_SIZE_PCT=0.05
 STOP_LOSS_PCT=0.03
+TRADING_FEE_PCT=0.001
+TRADING_PAUSED=False
 TRADING_PAIRS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,ADA/USDT
 ```
 
@@ -162,6 +169,9 @@ docker-compose up --build
 | `GET` | `/portfolio/metrics` | Aggregate performance metrics |
 | `GET` | `/portfolio/cycles` | Recent agent cycle runs |
 | `GET` | `/portfolio/positions` | Current open positions |
+| `GET` | `/portfolio/sentiment-validation` | Validate sentiment trading edge (≥30 trades) |
+| `POST` | `/portfolio/pause-trading` | Pause all new entry trades via flag file |
+| `POST` | `/portfolio/resume-trading` | Delete pause flag, resume normal trading |
 | `GET` | `/trades/history` | Trade history (optional `?symbol=` filter) |
 | `GET` | `/trades/stats` | Trade statistics (counts, volume) |
 | `GET` | `/trades/{trade_id}` | Single trade by UUID |
@@ -174,11 +184,12 @@ docker-compose up --build
 ## Dashboard Pages
 
 | Page | Description |
-|---|---|
+|---|---|---|
 | **Overview** | Portfolio value chart, asset allocation donut, agent status bar, Fear & Greed gauge, signal confidence chart |
 | **ML Signals** | Bullish/bearish/neutral counts, signal table with direction emojis, sentiment gauges per symbol, confidence over time |
 | **Trade History** | Stats cards, filterable trade table with coloured side column, P&L bar chart, best/worst trade |
 | **Risk Dashboard** | Drawdown, peak value, win rate, avg P&L; drawdown chart, cycle performance table, risk alert thresholds |
+| **Validation** | Sentiment-driven trade win rate with colour-coded metric, sample size progress bar, win/loss sentiment bar chart, statistical readiness gate (≥30 trades) |
 
 ---
 
@@ -189,20 +200,20 @@ The system runs a closed-loop trading cycle every hour:
 ```
 DataPipeline         → fetch candles + news + market data + funding rate + open interest
 FeatureEngineer      → compute indicators + volatility regime target (target_vol_regime)
-Predictor            → LSTM direction (2-class) + LSTMClassifier vol regime (sigmoid) + FinBERT sentiment
-Manager Agent        → combine signals, rank coins, filter (confidence ≥ 0.55, |sentiment| ≥ 0.30), halve position on high vol
-Risk Agent           → screen each proposed trade (5 checks)
-Execution Agent      → fire approved orders to Binance Testnet
-Portfolio Monitor    → update P&L, check rebalance, log cycle
-CRUD / Database      → persist everything to SQLite
+Predictor            → LSTM direction (2-class) + LSTMClassifier vol regime (sigmoid) + FinBERT sentiment (time-decay weighted)
+Manager Agent        → sentiment-primary (Option A): rank by |sentiment|, side from sentiment thresholds, skip if paused flag exists
+Risk Agent           → screen each proposed trade (6 checks + auto-exit bypass)
+Execution Agent      → fire approved orders to Binance Testnet, calculate + record fee_paid
+Portfolio Monitor    → check SL/TP auto-exit conditions, update P&L (fee-aware), check rebalance, log cycle
+CRUD / Database      → persist everything to SQLite including fee_paid, is_sentiment_driven, signal_confidence
 ```
 
 ### Agent Roles
 
-- **Manager Agent** — reads ML predictions + sentiment + volatility regime, ranks signals by composite score (`confidence × 0.6 + |sentiment| × 0.4`), detects conflicts (price vs. sentiment mismatch), filters out weak signals (`MIN_CONFIDENCE_THRESHOLD=0.55`, `MIN_SENTIMENT_STRENGTH=0.30`), halves position size in high-volatility regime, generates proposed trades with stop-loss and take-profit
-- **Risk Agent** — 5 independent checks: position size limit, concentration (≤20% per coin), total exposure (≤80%), drawdown circuit breaker (>15% halts trading), duplicate position prevention
-- **Execution Agent** — takes approved orders, fetches live price, models slippage (0–0.15%), routes market orders to Binance Testnet, records fill details
-- **Portfolio Monitor** — tracks live P&L per position, computes total value + drawdown from peak, triggers rebalance alerts when allocation drift > 10%
+- **Manager Agent (Option A)** — sentiment-primary trading: ranks signals by `|sentiment_score|`, side determined by thresholds (`>0.30 → BUY`, `<-0.30 → SELL`), halves position in high-volatility regime, appends `vol_tag` to reasoning; checks `data_cache/.trading_paused` flag at start of `run()` — skips all new entry proposals when paused, allowing only auto-exit trades through; LSTM direction model outputs logged for research only
+- **Risk Agent** — 6 independent checks: position size limit (≤5% of portfolio), concentration (≤20% per coin), total exposure (≤80%), drawdown circuit breaker (>15% halts all trading), duplicate position prevention, **correlation risk** (>2 same-direction open positions halves quantity, >3 rejects entirely); trades with `is_auto_exit=True` bypass all 6 checks
+- **Execution Agent** — takes approved orders from state, fetches live price, models random slippage (0–0.15%), calculates `fee_paid = executed_quantity × executed_price × TRADING_FEE_PCT`, routes market orders to Binance Testnet, records all fill details including order ID
+- **Portfolio Monitor** — calls `check_exit_conditions(state)` each cycle: iterates open positions, queries DB for SL/TP prices, generates `ProposedTrade` with `is_auto_exit=True` when triggered; tracks **fee-aware realised P&L**: `(exit_price - entry_price) × qty - proportional_entry_fee - exit_fee`; accumulates `total_entry_fees` per position on BUY, deducts proportionally on SELL; computes total portfolio value + drawdown from peak; triggers rebalance alerts when any position drifts >10% from equal-weight target
 
 ---
 
@@ -211,10 +222,10 @@ CRUD / Database      → persist everything to SQLite
 Five SQLAlchemy ORM tables:
 
 | Table | Key Columns |
-|---|---|
+|---|---|---|
 | `cycle_runs` | `cycle_id` (UUID), signals/proposed/approved/executed counts, portfolio value, P&L, drawdown, `cycle_log` (JSON) |
 | `signals` | FK → `cycle_runs.cycle_id`, symbol, predicted return, direction, confidence, sentiment score/label, Fear & Greed |
-| `trades` | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed quantity + price, stop-loss, take-profit, status, PnL |
+| `trades` | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed quantity + price, stop-loss, take-profit, status, PnL, `is_sentiment_driven` (Boolean), `signal_confidence` (Numeric), `fee_paid` (Numeric) |
 | `positions` | `symbol` (unique), quantity, avg entry price, current price, unrealised PnL |
 | `portfolio_snapshots` | FK → `cycle_runs.cycle_id`, total value, cash, positions value, P&L, peak value, drawdown |
 
@@ -273,6 +284,7 @@ AlphaCore/
 │   │       ├── signals.py
 │   │       ├── trades.py
 │   │       └── risk.py
+│   │       ├── validation.py
 │   ├── scheduler/             # APScheduler job definitions
 │   │   ├── __init__.py
 │   │   ├── job_runner.py      # SchedulerRunner class (lifecycle, signal handling)
