@@ -201,23 +201,27 @@ class Predictor:
             "regime_label": regime_label,
         }
 
-    def predict_sentiment(self, symbol: str, headlines: list[str]) -> dict[str, Any]:
-        """Score sentiment for a batch of headlines.
+    def predict_sentiment(self, symbol: str, headline_dicts: list[dict[str, Any]]) -> dict[str, Any]:
+        """Score sentiment for a batch of headline dicts.
+
+        Each dict must contain ``title`` and ``published_at`` keys.
+        See :meth:`SentimentModel.aggregate_sentiment` for decay details.
 
         Args:
             symbol: Trading pair in ``BTC/USDT`` format.
-            headlines: List of news headline strings.
+            headline_dicts: List of headline dicts from CryptoPanicClient.
 
         Returns:
             Dict from :meth:`SentimentModel.aggregate_sentiment` with
             ``symbol`` added.
         """
-        result = self.sentiment.aggregate_sentiment(headlines)
+        result = self.sentiment.aggregate_sentiment(headline_dicts)
         result["symbol"] = symbol
         _logger.info(
-            "Sentiment %s: composite=%.4f positive=%.4f negative=%.4f",
+            "Sentiment %s: composite=%.4f avg_age=%.1fh positive=%.4f negative=%.4f",
             format_pair_for_binance(symbol),
             result["composite_score"],
+            result.get("avg_headline_age_hours", 0.0),
             result.get("positive", 0.0),
             result.get("negative", 0.0),
         )

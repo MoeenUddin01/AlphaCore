@@ -15,6 +15,7 @@ from src.dashboard.pages.overview import render as render_overview
 from src.dashboard.pages.risk import render as render_risk
 from src.dashboard.pages.signals import render as render_signals
 from src.dashboard.pages.trades import render as render_trades
+from src.dashboard.pages.validation import render as render_validation
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
@@ -44,7 +45,7 @@ def main() -> None:
 
     page = st.sidebar.selectbox(
         "Navigate",
-        ["Overview", "ML Signals", "Trade History", "Risk Dashboard"],
+        ["Overview", "ML Signals", "Trade History", "Risk Dashboard", "Validation"],
     )
 
     st.sidebar.divider()
@@ -59,6 +60,24 @@ def main() -> None:
         st.rerun()
 
     st.sidebar.divider()
+    st.sidebar.markdown("**Trading Controls**")
+
+    col1, col2 = st.sidebar.columns(2)
+    if col1.button("⏸ Pause"):
+        try:
+            r = requests.post(f"{API_BASE_URL}/portfolio/pause-trading", timeout=5)
+            st.sidebar.success(r.json().get("message", "Paused"))
+        except requests.RequestException:
+            st.sidebar.error("API unreachable")
+
+    if col2.button("▶ Resume"):
+        try:
+            r = requests.post(f"{API_BASE_URL}/portfolio/resume-trading", timeout=5)
+            st.sidebar.success(r.json().get("message", "Resumed"))
+        except requests.RequestException:
+            st.sidebar.error("API unreachable")
+
+    st.sidebar.divider()
     st.sidebar.caption("v1.0.0")
 
     try:
@@ -70,6 +89,8 @@ def main() -> None:
             render_trades()
         elif page == "Risk Dashboard":
             render_risk()
+        elif page == "Validation":
+            render_validation()
     except Exception:
         st.exception("An unhandled error occurred on this page.")
 
