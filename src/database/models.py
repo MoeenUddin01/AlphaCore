@@ -8,7 +8,7 @@ portfolio snapshots.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, String, Text, JSON
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, Text, JSON
 
 from src.database.connection import Base
 
@@ -80,8 +80,11 @@ class Trade(Base):
     take_profit_price = Column(Numeric(20, 8), nullable=False)
     order_id = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="proposed")
+    is_sentiment_driven = Column(Boolean, nullable=False, default=True)
+    signal_confidence = Column(Numeric(10, 4), nullable=True)
     reasoning = Column(Text, nullable=True)
     pnl = Column(Numeric(20, 8), nullable=True)
+    fee_paid = Column(Numeric(20, 8), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 

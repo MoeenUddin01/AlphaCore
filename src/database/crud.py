@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, func
+from sqlalchemy import and_, desc, func
 
 from src.agents.agent_state import AgentState
 from src.database.connection import get_db
@@ -17,6 +17,24 @@ from src.database.models import CycleRun, PortfolioSnapshot, Position, Signal, T
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
+
+
+def is_cycle_already_processed(cycle_id: str) -> bool:
+    """Return ``True`` if a ``CycleRun`` with *cycle_id* exists in the DB.
+
+    Args:
+        cycle_id: The cycle identifier to check.
+
+    Returns:
+        ``True`` if a matching row exists, ``False`` otherwise.
+    """
+    with get_db() as db:
+        exists = (
+            db.query(CycleRun.cycle_id)
+            .filter(CycleRun.cycle_id == cycle_id)
+            .first()
+        )
+        return exists is not None
 
 
 def save_cycle(state: AgentState) -> str:
@@ -83,8 +101,11 @@ def save_cycle(state: AgentState) -> str:
                     take_profit_price=p.take_profit_price,
                     order_id=et.order_id,
                     status=et.status,
+                    is_sentiment_driven=getattr(p, "is_sentiment_driven", True),
+                    signal_confidence=getattr(p, "signal_confidence", None),
                     reasoning=p.reasoning,
                     pnl=et.pnl,
+                    fee_paid=getattr(et, "fee_paid", None),
                     created_at=et.timestamp,
                 )
             )
@@ -214,6 +235,45 @@ def get_trade_history(
     return result
 
 
+def get_open_trade_for_symbol(symbol: str) -> dict[str, Any] | None:
+    """Return the most recent filled BUY trade for *symbol*.
+
+    Used by the Portfolio Monitor to retrieve stop-loss and take-profit
+    prices for open position exit checks.
+
+    Args:
+        symbol: Trading pair (e.g. ``BTC/USDT``).
+
+    Returns:
+        Dict with keys ``stop_loss_price``, ``take_profit_price``,
+        ``entry_price``, ``symbol``, ``id``, or ``None`` if no trade found.
+    """
+    with get_db() as db:
+        trade = (
+            db.query(Trade)
+            .filter(
+                and_(
+                    Trade.symbol == symbol,
+                    Trade.side == "BUY",
+                    Trade.status == "FILLED",
+                )
+            )
+            .order_by(desc(Trade.created_at))
+            .first()
+        )
+    if trade is None:
+        _logger.debug("No open trade found for %s", symbol)
+        return None
+
+    return {
+        "id": trade.id,
+        "symbol": trade.symbol,
+        "entry_price": float(trade.entry_price) if trade.entry_price else 0.0,
+        "stop_loss_price": float(trade.stop_loss_price) if trade.stop_loss_price else 0.0,
+        "take_profit_price": float(trade.take_profit_price) if trade.take_profit_price else 0.0,
+    }
+
+
 def get_latest_signals() -> list[dict[str, Any]]:
     """Return all signals from the most recent cycle.
 
@@ -317,3 +377,103 @@ def get_performance_metrics() -> dict[str, Any]:
             metrics["current_drawdown_pct"] = float(latest_dd)
 
     return metrics
+
+
+def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
+    """Analyse performance of sentiment-driven trades within the last *days*.
+
+    Queries filled trades where ``is_sentiment_driven`` is True and
+    ``created_at`` falls within the window. Computes win/loss statistics
+    and compares average sentiment confidence between winners and losers.
+
+    Args:
+        days: Lookback window in days (default 30).
+
+    Returns:
+        Dict with keys ``total_sentiment_trades``, ``winning_trades``,
+        ``losing_trades``, ``win_rate_pct``, ``avg_win_amount``,
+        ``avg_loss_amount``, ``total_pnl``, ``avg_sentiment_score_winners``,
+        ``avg_sentiment_score_losers``, ``is_statistically_ready``.
+    """
+    import datetime as dt
+
+    cutoff = dt.datetime.utcnow() - dt.timedelta(days=days)
+
+    with get_db() as db:
+        rows = (
+            db.query(Trade)
+            .filter(
+                and_(
+                    Trade.is_sentiment_driven == True,
+                    Trade.status == "FILLED",
+                    Trade.created_at >= cutoff,
+                )
+            )
+            .all()
+        )
+
+    total = len(rows)
+    winners = [r for r in rows if r.pnl is not None and r.pnl > 0]
+    losers = [r for r in rows if r.pnl is not None and r.pnl <= 0]
+
+    total_sentiment_trades = total
+    winning_trades = len(winners)
+    losing_trades = len(losers)
+    win_rate_pct = (winning_trades / total * 100) if total > 0 else 0.0
+
+    avg_win_amount = (
+        sum(float(r.pnl) for r in winners) / winning_trades
+        if winning_trades > 0
+        else 0.0
+    )
+    avg_loss_amount = (
+        sum(float(r.pnl) for r in losers) / losing_trades
+        if losing_trades > 0
+        else 0.0
+    )
+
+    total_pnl = sum(float(r.pnl) for r in rows if r.pnl is not None)
+
+    scores_winners = []
+    for r in winners:
+        c = r.signal_confidence
+        if c is not None:
+            scores_winners.append(float(c))
+    scores_losers = []
+    for r in losers:
+        c = r.signal_confidence
+        if c is not None:
+            scores_losers.append(float(c))
+
+    avg_sentiment_score_winners = (
+        sum(scores_winners) / len(scores_winners)
+        if scores_winners
+        else 0.0
+    )
+    avg_sentiment_score_losers = (
+        sum(scores_losers) / len(scores_losers)
+        if scores_losers
+        else 0.0
+    )
+
+    is_statistically_ready = total >= 30
+    if not is_statistically_ready:
+        needed = 30 - total
+        _logger.warning(
+            "Sentiment trade sample too small (%d trades) — need %d more "
+            "for statistically reliable validation",
+            total, needed,
+        )
+
+    return {
+        "total_sentiment_trades": total_sentiment_trades,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "win_rate_pct": round(win_rate_pct, 2),
+        "avg_win_amount": round(avg_win_amount, 2),
+        "avg_loss_amount": round(avg_loss_amount, 2),
+        "total_pnl": round(total_pnl, 2),
+        "avg_sentiment_score_winners": round(avg_sentiment_score_winners, 4),
+        "avg_sentiment_score_losers": round(avg_sentiment_score_losers, 4),
+        "is_statistically_ready": is_statistically_ready,
+    }

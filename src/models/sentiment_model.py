@@ -1,9 +1,11 @@
 """FinBERT sentiment analysis for crypto news headlines.
 
 Wraps the ProsusAI/finbert model from HuggingFace to score individual
-headlines and aggregate sentiment over a batch of news.
+headlines and aggregate sentiment over a batch of news with time-decay
+weighting so that fresher headlines contribute more to the composite score.
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 import torch
@@ -75,34 +77,84 @@ class SentimentModel:
         """
         return [self.score_headline(h) for h in headlines]
 
-    def aggregate_sentiment(self, headlines: list[str]) -> dict[str, Any]:
-        """Score all headlines and return averaged sentiment.
+    def aggregate_sentiment(self, headline_dicts: list[dict[str, Any]]) -> dict[str, Any]:
+        """Score all headlines and return time-decay-weighted sentiment.
+
+        Each headline dict must contain a ``title`` (str) and a
+        ``published_at`` (datetime).  Fresher headlines receive higher
+        weight via a linear decay over 24 hours (floor 10 %).
 
         Args:
-            headlines: List of headline strings. May be empty.
+            headline_dicts: List of dicts with ``title`` and
+                ``published_at`` keys. May be empty.
 
         Returns:
-            Dict with averaged ``positive``, ``negative``, ``neutral``
-            scores and a ``composite_score`` (``positive - negative``,
-            ranging from -1 to +1).
+            Dict with weighted ``positive``, ``negative``, ``neutral``
+            scores, a ``composite_score`` (``positive - negative``,
+            range -1 to +1), and ``avg_headline_age_hours`` (float).
         """
-        if not headlines:
+        if not headline_dicts:
             _logger.warning("Empty headline list — returning neutral scores")
             return {
                 "positive": 0.0,
                 "negative": 0.0,
                 "neutral": 1.0,
                 "composite_score": 0.0,
+                "avg_headline_age_hours": 0.0,
             }
 
-        scores = self.score_headlines(headlines)
-        avg: dict[str, float] = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
-        for s in scores:
-            for key in avg:
-                avg[key] += s[key]
-        n = len(scores)
-        for key in avg:
-            avg[key] /= n
+        titles: list[str] = []
+        weights: list[float] = []
+        now = datetime.now(timezone.utc)
+        total_age = 0.0
 
-        avg["composite_score"] = avg["positive"] - avg["negative"]
-        return avg
+        for h in headline_dicts:
+            title = h.get("title", "")
+            if not title:
+                continue
+            titles.append(title)
+
+            published = h.get("published_at")
+            if isinstance(published, datetime):
+                if published.tzinfo is None:
+                    published = published.replace(tzinfo=timezone.utc)
+                hours_old = (now - published).total_seconds() / 3600.0
+            else:
+                hours_old = 24.0
+
+            total_age += hours_old
+            weight = max(0.1, 1.0 - (hours_old / 24.0))
+            weights.append(weight)
+
+        if not titles:
+            _logger.warning("No valid headlines after filtering — returning neutral scores")
+            return {
+                "positive": 0.0,
+                "negative": 0.0,
+                "neutral": 1.0,
+                "composite_score": 0.0,
+                "avg_headline_age_hours": 0.0,
+            }
+
+        scores = self.score_headlines(titles)
+
+        weighted: dict[str, float] = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+        total_weight = sum(weights)
+
+        for s, w in zip(scores, weights):
+            for key in weighted:
+                weighted[key] += s[key] * w
+
+        for key in weighted:
+            weighted[key] /= total_weight
+
+        weighted["composite_score"] = weighted["positive"] - weighted["negative"]
+        weighted["avg_headline_age_hours"] = round(total_age / len(titles), 2)
+
+        _logger.info(
+            "Aggregated sentiment: composite=%.4f avg_age=%.1fh weights=%d",
+            weighted["composite_score"],
+            weighted["avg_headline_age_hours"],
+            len(weights),
+        )
+        return weighted

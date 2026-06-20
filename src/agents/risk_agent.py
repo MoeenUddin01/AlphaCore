@@ -53,7 +53,10 @@ class RiskAgent:
             existing_symbols.add(et.proposal.symbol)
 
         approved: list[ProposedTrade] = []
+        auto_exits_approved: int = 0
         rejection_reasons: list[dict[str, Any]] = []
+        correlation_adjustments: int = 0
+        correlation_rejections: int = 0
 
         drawdown_pct = ((peak_value - total_value) / peak_value * 100) if peak_value > 0 else 0.0
         circuit_breaker = drawdown_pct > 15.0
@@ -66,6 +69,15 @@ class RiskAgent:
             )
 
         for trade in state.get("proposed_trades", []):
+            if getattr(trade, "is_auto_exit", False):
+                approved.append(trade)
+                auto_exits_approved += 1
+                _logger.info(
+                    "Auto-exit approved %s %s (qty=%s) — bypassing risk checks",
+                    trade.side, trade.symbol, trade.quantity,
+                )
+                continue
+
             if circuit_breaker:
                 rejection_reasons.append({
                     "symbol": trade.symbol,
@@ -127,6 +139,33 @@ class RiskAgent:
                 _logger.warning("Rejected %s (duplicate position)", trade.symbol)
                 continue
 
+            same_direction_count = sum(
+                1 for et in state.get("executed_trades", [])
+                if et.proposal.side == trade.side
+            ) + sum(
+                1 for t in approved if t.side == trade.side
+            )
+            if same_direction_count > 3:
+                rejection_reasons.append({
+                    "symbol": trade.symbol,
+                    "reason": (
+                        f"Correlation limit: too many same-direction crypto positions "
+                        f"open simultaneously ({same_direction_count} total)"
+                    ),
+                })
+                correlation_rejections += 1
+                _logger.warning("Rejected %s (correlation limit — %d same-direction)", trade.symbol, same_direction_count)
+                continue
+            if same_direction_count > 2:
+                original_qty = trade.quantity
+                trade.quantity = trade.quantity / Decimal("2")
+                correlation_adjustments += 1
+                _logger.info(
+                    "%s quantity halved — %s -> %s (%d other same-direction positions already open, "
+                    "correlated sentiment risk)",
+                    trade.symbol, original_qty, trade.quantity, same_direction_count,
+                )
+
             approved.append(trade)
             _logger.info("Approved %s %s (qty=%s, entry=%s)", trade.side, trade.symbol, trade.quantity, trade.entry_price)
 
@@ -143,6 +182,9 @@ class RiskAgent:
             "total_proposed": len(state.get("proposed_trades", [])),
             "total_approved": len(approved),
             "total_rejected": len(rejection_reasons),
+            "auto_exits_approved": auto_exits_approved,
+            "correlation_adjustments": correlation_adjustments,
+            "correlation_rejections": correlation_rejections,
             "rejection_reasons": rejection_reasons,
             "portfolio_exposure_pct": round(portfolio_exposure_pct, 2),
             "drawdown_pct": round(drawdown_pct, 2),
@@ -150,13 +192,15 @@ class RiskAgent:
 
         state["cycle_log"].append(
             f"[{datetime.utcnow().isoformat()}] RiskAgent: "
-            f"{state['risk_report']['total_approved']}/{state['risk_report']['total_proposed']} trades approved, "
+            f"{state['risk_report']['total_approved']}/{state['risk_report']['total_proposed']} trades approved "
+            f"({auto_exits_approved} auto-exits), "
             f"exposure {portfolio_exposure_pct:.1f}%, drawdown {drawdown_pct:.1f}%"
         )
         _logger.info(
-            "RiskAgent done — %d/%d approved, exposure=%.1f%%, drawdown=%.1f%%",
+            "RiskAgent done — %d/%d approved (%d auto-exits), exposure=%.1f%%, drawdown=%.1f%%",
             len(approved),
             len(state.get("proposed_trades", [])),
+            auto_exits_approved,
             portfolio_exposure_pct,
             drawdown_pct,
         )

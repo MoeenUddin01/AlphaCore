@@ -4,6 +4,7 @@ Exposes portfolio snapshots, performance metrics, cycle summaries,
 and current open positions via a FastAPI ``APIRouter``.
 """
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -15,7 +16,11 @@ from src.api.schemas import (
     PortfolioSnapshotResponse,
 )
 from src.database.connection import get_db
-from src.database.crud import get_performance_metrics, get_portfolio_history
+from src.database.crud import (
+    get_performance_metrics,
+    get_portfolio_history,
+    get_sentiment_trade_performance,
+)
 from src.database.models import CycleRun, Position
 from src.utils.logger import get_logger
 
@@ -119,3 +124,68 @@ def list_positions() -> list[dict[str, Any]]:
     except Exception:
         _logger.exception("GET /portfolio/positions failed")
         raise HTTPException(status_code=500, detail="Failed to fetch positions")
+
+
+@router.get(
+    "/sentiment-validation",
+    summary="Validate sentiment trading edge",
+    description="Validates whether sentiment-driven trading has real edge. "
+    "Requires minimum 30 trades for statistical reliability. "
+    "Use this before risking real capital.",
+)
+def sentiment_validation(days: int = 30) -> dict[str, Any]:
+    _logger.info("GET /portfolio/sentiment-validation (days=%d)", days)
+    try:
+        result = get_sentiment_trade_performance(days=days)
+        _logger.info(
+            "GET /portfolio/sentiment-validation -> %d trades, win_rate=%.2f%%",
+            result["total_sentiment_trades"],
+            result["win_rate_pct"],
+        )
+        return result
+    except Exception:
+        _logger.exception("GET /portfolio/sentiment-validation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to compute sentiment validation metrics",
+        )
+
+
+_PAUSE_FLAG = Path("data_cache/.trading_paused")
+
+
+@router.post(
+    "/pause-trading",
+    summary="Pause all new trading",
+    description="Writes a flag file to disk. The Manager Agent checks for this "
+    "file and skips generating new entry trades when it exists. "
+    "Auto-exit trades (SL/TP) are NOT blocked.",
+)
+def pause_trading() -> dict[str, Any]:
+    _logger.info("POST /portfolio/pause-trading")
+    try:
+        _PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        _PAUSE_FLAG.touch()
+        _logger.info("Trading paused — flag file created at %s", _PAUSE_FLAG)
+        return {"status": "paused", "message": "Trading paused. New entry trades will be skipped."}
+    except Exception as exc:
+        _logger.exception("POST /portfolio/pause-trading failed")
+        raise HTTPException(status_code=500, detail=f"Failed to pause trading: {exc}")
+
+
+@router.post(
+    "/resume-trading",
+    summary="Resume normal trading",
+    description="Deletes the pause flag file. The next cycle will generate new entry trades normally.",
+)
+def resume_trading() -> dict[str, Any]:
+    _logger.info("POST /portfolio/resume-trading")
+    try:
+        if _PAUSE_FLAG.exists():
+            _PAUSE_FLAG.unlink()
+            _logger.info("Trading resumed — flag file deleted from %s", _PAUSE_FLAG)
+            return {"status": "resumed", "message": "Trading resumed. New entry trades will be generated."}
+        return {"status": "already_active", "message": "Trading was not paused."}
+    except Exception as exc:
+        _logger.exception("POST /portfolio/resume-trading failed")
+        raise HTTPException(status_code=500, detail=f"Failed to resume trading: {exc}")

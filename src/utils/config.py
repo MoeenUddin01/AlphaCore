@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     PORTFOLIO_INITIAL_CAPITAL: Decimal = Decimal("10000")
     MAX_POSITION_SIZE_PCT: float = 0.05
     STOP_LOSS_PCT: float = 0.03
+    TRADING_FEE_PCT: float = 0.001
+    TRADING_PAUSED: bool = False
 
     TRADING_PAIRS: Annotated[Json[list[str]], BeforeValidator(_parse_trading_pairs)] = [
         "BTC/USDT",

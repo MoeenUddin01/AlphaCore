@@ -87,6 +87,7 @@ class ExecutionAgent:
                 order_id="",
                 status="FAILED",
                 timestamp=state["timestamp"],
+                fee_paid=Decimal("0"),
                 pnl=Decimal("0"),
             )
 
@@ -136,6 +137,8 @@ class ExecutionAgent:
             executed_qty = Decimal("0")
             status_flag = "FAILED"
 
+        fee_amount = executed_qty * actual_fill * Decimal(str(settings.TRADING_FEE_PCT))
+
         return ExecutedTrade(
             proposal=trade,
             executed_price=actual_fill,
@@ -143,5 +146,6 @@ class ExecutionAgent:
             order_id=str(order_id),
             status=status_flag,
             timestamp=state["timestamp"],
+            fee_paid=fee_amount,
             pnl=Decimal("0"),
         )

@@ -69,6 +69,24 @@ def init_db() -> None:
     tables_before = len(Base.metadata.tables)
     Base.metadata.create_all(bind=engine)
     tables_after = len(Base.metadata.tables)
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
+        )
+        trades_exists = result.scalar() is not None
+        if trades_exists:
+            col_result = conn.execute(
+                text("PRAGMA table_info(trades)")
+            )
+            cols = {row[1] for row in col_result.fetchall()}
+            if "is_sentiment_driven" not in cols:
+                _logger.warning(
+                    "The 'trades' table is missing column 'is_sentiment_driven'. "
+                    "Delete the old .db file and let it recreate fresh — "
+                    "this is pre-production paper trading, safe to do so."
+                )
+
     _logger.info(
         "Database ready — %d table(s) registered, %d created",
         tables_after,

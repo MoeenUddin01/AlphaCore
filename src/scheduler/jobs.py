@@ -9,15 +9,20 @@ Defines the four recurring jobs that APScheduler runs:
 
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
+
+from filelock import FileLock, Timeout
 
 from src.agents import run_cycle
 from src.data.data_pipeline import DataPipeline
 from src.database.connection import check_db_connection, init_db
-from src.database.crud import get_portfolio_history, save_cycle, update_positions
+from src.database.crud import get_portfolio_history, is_cycle_already_processed, save_cycle, update_positions
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
+
+_LOCK_PATH = f"{settings.DATA_CACHE_DIR}/.trading_cycle.lock"
 
 
 def run_trading_cycle() -> None:
@@ -28,6 +33,23 @@ def run_trading_cycle() -> None:
     Never raises — all errors are caught and logged.
     """
     _logger.info("=== TRADING CYCLE START ===")
+
+    lock = FileLock(_LOCK_PATH, timeout=5)
+    try:
+        lock.acquire()
+    except Timeout:
+        _logger.warning(
+            "Cannot acquire trading cycle lock at %s — "
+            "another cycle is already running. Skipping this tick.",
+            _LOCK_PATH,
+        )
+        return
+
+    cycle_id = str(uuid4())
+    if is_cycle_already_processed(cycle_id):
+        _logger.warning("Cycle %s already processed — skipping", cycle_id)
+        return
+
     try:
         pipeline_data = DataPipeline().run()
         history = get_portfolio_history(limit=1)
@@ -53,6 +75,9 @@ def run_trading_cycle() -> None:
         )
     except Exception:
         _logger.exception("Trading cycle failed — full traceback below")
+    finally:
+        lock.release()
+        _logger.debug("Released trading cycle lock at %s", _LOCK_PATH)
 
 
 def run_data_cache_refresh() -> None:
