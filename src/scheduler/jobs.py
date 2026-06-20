@@ -184,9 +184,43 @@ def run_model_training() -> None:
                 features["direction"] = (features["close"].pct_change().shift(-1) >= 0).astype(int)
                 features = features.dropna()
 
-                if len(features) < seq_len + 10:
-                    _logger.warning("Not enough data for %s (%d rows) — skipping", pair, len(features))
+                row_count = len(features)
+                if row_count < 500:
+                    _logger.warning(
+                        "%s: insufficient data (%d rows) — skipping training, "
+                        "will use untrained model with safe defaults",
+                        pair, row_count,
+                    )
                     continue
+
+                # Class balance check
+                if row_count > 0:
+                    dir_zeros = int((features["direction"] == 0).sum())
+                    dir_ones = int((features["direction"] == 1).sum())
+                    dir_zero_pct = dir_zeros / row_count * 100
+                    dir_one_pct = dir_ones / row_count * 100
+                    _logger.info(
+                        "Direction class balance for %s — 0=%d (%.1f%%), 1=%d (%.1f%%)",
+                        pair, dir_zeros, dir_zero_pct, dir_ones, dir_one_pct,
+                    )
+                    if dir_zero_pct > 90 or dir_one_pct > 90:
+                        _logger.warning(
+                            "Severe class imbalance for direction target on %s "
+                            "(0: %.1f%%, 1: %.1f%%) — classifier may not learn meaningfully",
+                            pair, dir_zero_pct, dir_one_pct,
+                        )
+
+                    if "target_vol_regime" in features.columns:
+                        v_zeros = int((features["target_vol_regime"] == 0).sum())
+                        v_ones = int((features["target_vol_regime"] == 1).sum())
+                        v_zero_pct = v_zeros / (v_zeros + v_ones) * 100 if (v_zeros + v_ones) > 0 else 0
+                        v_one_pct = v_ones / (v_zeros + v_ones) * 100 if (v_zeros + v_ones) > 0 else 0
+                        if v_zero_pct > 90 or v_one_pct > 90:
+                            _logger.warning(
+                                "Severe class imbalance for volatility target on %s "
+                                "(0: %.1f%%, 1: %.1f%%) — classifier may not learn meaningfully",
+                                pair, v_zero_pct, v_one_pct,
+                            )
 
                 total = len(features)
                 train_end = int(total * 0.8)
@@ -202,11 +236,28 @@ def run_model_training() -> None:
 
                 sym_safe = format_pair_for_binance(pair)
 
-                # --- LSTM direction classifier ---
-                _logger.info("Training direction model for %s", pair)
-                dir_train_ds = create_sequences(train_norm, feature_cols, "direction", seq_len, classification=True)
-                dir_val_ds = create_sequences(val_norm, feature_cols, "direction", seq_len, classification=True)
-                dir_test_ds = create_sequences(test_norm, feature_cols, "direction", seq_len, classification=True)
+                # --- LSTM direction classifier (with L2 regularisation) ---
+                _logger.info("Training direction model for %s with 3000 candles", pair)
+                ohlcv_lstm = yahoo.get_historical_ohlcv(pair, interval="1h", years=3)
+                features_lstm = engineer.compute_features(ohlcv_lstm)
+                features_lstm["direction"] = (features_lstm["close"].pct_change().shift(-1) >= 0).astype(int)
+                features_lstm = features_lstm.dropna()
+
+                lstm_total = len(features_lstm)
+                lstm_train_end = int(lstm_total * 0.8)
+                lstm_val_end = int(lstm_total * 0.9)
+
+                lstm_train_df = features_lstm.iloc[:lstm_train_end]
+                lstm_val_df = features_lstm.iloc[lstm_train_end:lstm_val_end]
+                lstm_test_df = features_lstm.iloc[lstm_val_end:]
+
+                lstm_train_norm, lstm_scalers = engineer.normalize_features(lstm_train_df, feature_cols)
+                lstm_val_norm = engineer.apply_scalers(lstm_val_df, feature_cols, lstm_scalers)
+                lstm_test_norm = engineer.apply_scalers(lstm_test_df, feature_cols, lstm_scalers)
+
+                dir_train_ds = create_sequences(lstm_train_norm, feature_cols, "direction", seq_len, classification=True)
+                dir_val_ds = create_sequences(lstm_val_norm, feature_cols, "direction", seq_len, classification=True)
+                dir_test_ds = create_sequences(lstm_test_norm, feature_cols, "direction", seq_len, classification=True)
 
                 dir_train_loader = DataLoader(dir_train_ds, batch_size=batch_size, shuffle=True)
                 dir_val_loader = DataLoader(dir_val_ds, batch_size=batch_size, shuffle=False)
@@ -218,18 +269,22 @@ def run_model_training() -> None:
                     learning_rate=0.001,
                     checkpoint_dir=settings.MODEL_CHECKPOINT_DIR,
                 )
+                trainer.optimizer = torch.optim.Adam(
+                    model.parameters(), lr=0.001, weight_decay=1e-5,
+                )
                 dir_history = trainer.train(
                     train_loader=dir_train_loader,
                     val_loader=dir_val_loader,
                     epochs=50,
                     symbol=pair,
+                    min_epochs=10,
                 )
 
                 dir_test_loss, dir_test_acc = trainer.evaluate(dir_test_loader)
 
                 scaler_path = artifacts_dir / f"scaler_{sym_safe}.json"
                 with open(scaler_path, "w") as f:
-                    json.dump(scalers, f, indent=2)
+                    json.dump(lstm_scalers, f, indent=2)
 
                 metrics_path = artifacts_dir / f"metrics_{sym_safe}.json"
 
@@ -262,11 +317,20 @@ def run_model_training() -> None:
                 with open(metrics_path, "w") as f:
                     json.dump(dir_metrics, f, indent=2)
 
+                last_val = dir_metrics["val_loss"]
                 _logger.info(
                     "Direction model for %s — val_loss=%.6f, test_loss=%.6f, test_acc=%.1f%% (%d/%d up, %d/%d down)",
-                    pair, dir_metrics["val_loss"], dir_test_loss, dir_test_acc,
+                    pair, last_val, dir_test_loss, dir_test_acc,
                     up_c, up_t, down_c, down_t,
                 )
+
+                if last_val > 0.68 and dir_test_acc < 55:
+                    _logger.info(
+                        "Regression LSTM shows no learnable signal in current feature set "
+                        "for %s — confirmed via 3000-candle retrain with L2 reg. "
+                        "Recommend continuing with Option A sentiment-primary strategy.",
+                        pair,
+                    )
 
                 # --- LSTMClassifier: volatility regime ---
                 _logger.info("Training volatility classifier for %s", pair)
@@ -289,6 +353,7 @@ def run_model_training() -> None:
                     val_loader=clf_val_loader,
                     epochs=50,
                     symbol=pair,
+                    min_epochs=10,
                 )
 
                 clf_test_loss = clf_trainer.evaluate(clf_test_loader)

@@ -1,8 +1,8 @@
 """Master orchestrator for all data fetching and feature computation.
 
-Coordinates Binance, CoinGecko, CryptoPanic, and feature engineering
-into a single ``run()`` call that returns a structured dict ready for
-the prediction and agent layers.
+Coordinates Binance, CoinGecko, and CoinDesk RSS news into a single
+``run()`` call that returns a structured dict ready for the prediction
+and agent layers.  The RSS news source requires zero API keys.
 """
 
 from pathlib import Path
@@ -13,8 +13,8 @@ import pandas as pd
 
 from src.data.binance_client import BinanceClient
 from src.data.coingecko_client import CoinGeckoClient
-from src.data.cryptopanic_client import CryptoPanicClient
 from src.data.feature_engineer import FeatureEngineer
+from src.data.rss_news_client import CoinDeskRSSClient
 from src.utils.config import settings
 from src.utils.helpers import format_pair_for_binance
 from src.utils.logger import get_logger
@@ -29,7 +29,7 @@ class DataPipeline:
         _logger.info("Initialising DataPipeline")
         self.binance = BinanceClient()
         self.coingecko = CoinGeckoClient()
-        self.cryptopanic = CryptoPanicClient()
+        self.rss_client = CoinDeskRSSClient()
         self.feature_engineer = FeatureEngineer()
         self._cache_dir = Path(settings.DATA_CACHE_DIR)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -98,12 +98,12 @@ class DataPipeline:
                 _logger.error("Market data failed for %s: %s", pair, exc)
                 pair_data["market_data"] = {}
 
-            try:
-                news = self.cryptopanic.get_news_for_pair(pair, limit=10)
-                pair_data["news"] = news
-            except Exception as exc:
-                _logger.error("News fetch failed for %s: %s", pair, exc)
-                pair_data["news"] = []
+            news = self.rss_client.get_news_for_pair(pair, limit=15)
+            pair_data["news"] = news
+            _logger.info(
+                "RSS headlines for %s: %d articles returned",
+                pair, len(news),
+            )
 
             try:
                 funding_data = self.binance.get_funding_rate(pair)

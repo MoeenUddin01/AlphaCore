@@ -84,11 +84,18 @@ class FeatureEngineer:
 
         out["volatility"] = out["returns"].rolling(window=24).std()
 
+        indicator_cols = [
+            "rsi", "macd", "macd_signal",
+            "bb_upper", "bb_middle", "bb_lower",
+            "atr", "ema_20", "ema_50",
+            "returns", "log_returns", "volatility",
+        ]
+        present = [c for c in indicator_cols if c in out.columns]
         before = len(out)
-        out = out.dropna()
+        out = out.dropna(subset=present, how="all")
         after = len(out)
         _logger.info(
-            "Dropped %d NaN rows — %d rows remaining",
+            "Dropped %d NaN-only rows (all indicators NaN) — %d rows remaining",
             before - after,
             after,
         )

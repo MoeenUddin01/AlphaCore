@@ -56,6 +56,7 @@ class LSTMTrainer:
         val_loader: DataLoader,
         epochs: int = 50,
         symbol: str = "",
+        min_epochs: int = 10,
     ) -> dict[str, list[float]]:
         """Run the full training loop with early stopping.
 
@@ -65,6 +66,8 @@ class LSTMTrainer:
             epochs: Maximum number of training epochs.
             symbol: Trading pair symbol (e.g. ``BTCUSDT``) used for
                 checkpoint filenames.
+            min_epochs: Minimum number of epochs to run regardless of
+                early stopping.
 
         Returns:
             Dict with keys ``train_loss`` and ``val_loss``, each a list
@@ -75,7 +78,7 @@ class LSTMTrainer:
         self._patience_counter = 0
         self._current_symbol = symbol
 
-        _logger.info("Starting training for up to %d epochs", epochs)
+        _logger.info("Starting training for up to %d epochs (min_epochs=%d)", epochs, min_epochs)
 
         for epoch in range(1, epochs + 1):
             train_loss = self._run_epoch(train_loader, training=True)
@@ -84,15 +87,15 @@ class LSTMTrainer:
             history["train_loss"].append(train_loss)
             history["val_loss"].append(val_loss)
 
-            if epoch % 5 == 0 or epoch == 1:
-                _logger.info(
-                    "Epoch %3d/%d — train_loss: %.6f, val_loss: %.6f, val_acc: %.1f%%",
-                    epoch,
-                    epochs,
-                    train_loss,
-                    val_loss,
-                    val_acc,
-                )
+            _logger.info(
+                "Epoch %3d/%d — train_loss: %.6f, val_loss: %.6f, val_acc: %.1f%%%s",
+                epoch,
+                epochs,
+                train_loss,
+                val_loss,
+                val_acc,
+                "  (best so far)" if val_loss < self._best_val_loss else "",
+            )
 
             if val_loss < self._best_val_loss:
                 self._best_val_loss = val_loss
@@ -105,7 +108,7 @@ class LSTMTrainer:
                 )
             else:
                 self._patience_counter += 1
-                if self._patience_counter >= self._patience:
+                if epoch >= min_epochs and self._patience_counter >= self._patience:
                     _logger.info(
                         "Early stopping triggered after %d epochs without improvement",
                         self._patience,
@@ -268,10 +271,11 @@ class LSTMClassifierTrainer:
         val_loader: DataLoader,
         epochs: int = 50,
         symbol: str = "",
+        min_epochs: int = 10,
     ) -> dict[str, list[float]]:
         """Run the full training loop with early stopping.
 
-        Logs both BCE loss and binary accuracy every 5 epochs.
+        Logs both BCE loss and binary accuracy every epoch.
 
         Args:
             train_loader: DataLoader for training samples.
@@ -279,6 +283,8 @@ class LSTMClassifierTrainer:
             epochs: Maximum number of training epochs.
             symbol: Trading pair symbol (e.g. ``BTCUSDT``) used for
                 checkpoint filenames.
+            min_epochs: Minimum number of epochs to run regardless of
+                early stopping.
 
         Returns:
             Dict with keys ``train_loss``, ``val_loss``, and
@@ -291,7 +297,7 @@ class LSTMClassifierTrainer:
         self._patience_counter = 0
         self._current_symbol = symbol
 
-        _logger.info("Starting training for up to %d epochs", epochs)
+        _logger.info("Starting training for up to %d epochs (min_epochs=%d)", epochs, min_epochs)
 
         for epoch in range(1, epochs + 1):
             train_loss = self._run_epoch(train_loader, training=True)
@@ -302,15 +308,15 @@ class LSTMClassifierTrainer:
             history["val_loss"].append(val_loss)
             history["val_accuracy"].append(val_acc)
 
-            if epoch % 5 == 0 or epoch == 1:
-                _logger.info(
-                    "Epoch %3d/%d — train_loss: %.6f, val_loss: %.6f, val_acc: %.2f%%",
-                    epoch,
-                    epochs,
-                    train_loss,
-                    val_loss,
-                    val_acc * 100,
-                )
+            _logger.info(
+                "Epoch %3d/%d — train_loss: %.6f, val_loss: %.6f, val_acc: %.2f%%%s",
+                epoch,
+                epochs,
+                train_loss,
+                val_loss,
+                val_acc * 100,
+                "  (best so far)" if val_loss < self._best_val_loss else "",
+            )
 
             if val_loss < self._best_val_loss:
                 self._best_val_loss = val_loss
@@ -323,7 +329,7 @@ class LSTMClassifierTrainer:
                 )
             else:
                 self._patience_counter += 1
-                if self._patience_counter >= self._patience:
+                if epoch >= min_epochs and self._patience_counter >= self._patience:
                     _logger.info(
                         "Early stopping triggered after %d epochs without improvement",
                         self._patience,
