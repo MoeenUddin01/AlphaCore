@@ -39,6 +39,12 @@ apscheduler>=3.10.0
 # Lock mechanism
 filelock>=3.0.0
 
+# RSS fallback
+feedparser>=6.0.0
+
+# Reddit API
+praw>=7.7.0
+
 # Testing
 pytest>=8.0.0
 

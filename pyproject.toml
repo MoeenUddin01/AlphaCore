@@ -23,4 +23,5 @@ dependencies = [
     "plotly>=6.7.0",
     "apscheduler>=3.11.2",
     "yfinance>=1.4.1",
+    "feedparser",
 ]

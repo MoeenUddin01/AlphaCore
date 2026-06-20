@@ -38,6 +38,11 @@ class Settings(BaseSettings):
 
     CRYPTOPANIC_API_KEY: str
     COINGECKO_API_KEY: str = ""
+    CRYPTOCOMPARE_API_KEY: str = ""
+
+    REDDIT_CLIENT_ID: str = ""
+    REDDIT_CLIENT_SECRET: str = ""
+    REDDIT_USER_AGENT: str = "AlphaCore/1.0"
 
     DATABASE_URL: str = "sqlite:///./alphacore.db"
     LOG_LEVEL: str = "INFO"
