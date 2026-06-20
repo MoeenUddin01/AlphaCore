@@ -112,8 +112,8 @@ def run_model_training() -> None:
     """Train two models per trading pair on startup: a direction
     classifier (LSTMModel) and a volatility-regime classifier (LSTMClassifier).
 
-    Fetches 2 years of 1h candles from Yahoo Finance, engineers
-    technical features, and creates two binary targets:
+    Fetches 1h candles from Binance, engineers technical features,
+    and creates two binary targets:
       - ``direction``: 1 if the next candle's return >= 0, else 0.
       - ``target_vol_regime``: 1 if the next 4-candle range exceeds
         the rolling 24-candle median range, else 0.
@@ -142,13 +142,13 @@ def run_model_training() -> None:
         import torch
         from torch.utils.data import DataLoader
 
+        from src.data.binance_client import BinanceClient
         from src.data.feature_engineer import FeatureEngineer
-        from src.data.yahoo_client import YahooClient
         from src.models.lstm_model import LSTMClassifier, LSTMModel, create_sequences
         from src.models.trainer import LSTMClassifierTrainer, LSTMTrainer
         from src.utils.helpers import format_pair_for_binance
 
-        yahoo = YahooClient()
+        binance = BinanceClient()
         engineer = FeatureEngineer()
 
         feature_cols = [
@@ -179,7 +179,7 @@ def run_model_training() -> None:
         for pair in settings.TRADING_PAIRS:
             _logger.info("Training models for %s", pair)
             try:
-                ohlcv = yahoo.get_historical_ohlcv(pair, interval="1h", years=2)
+                ohlcv = binance.get_ohlcv(pair, interval="1h", limit=1500)
                 features = engineer.compute_features(ohlcv)
                 features["direction"] = (features["close"].pct_change().shift(-1) >= 0).astype(int)
                 features = features.dropna()
@@ -237,27 +237,10 @@ def run_model_training() -> None:
                 sym_safe = format_pair_for_binance(pair)
 
                 # --- LSTM direction classifier (with L2 regularisation) ---
-                _logger.info("Training direction model for %s with 3000 candles", pair)
-                ohlcv_lstm = yahoo.get_historical_ohlcv(pair, interval="1h", years=3)
-                features_lstm = engineer.compute_features(ohlcv_lstm)
-                features_lstm["direction"] = (features_lstm["close"].pct_change().shift(-1) >= 0).astype(int)
-                features_lstm = features_lstm.dropna()
-
-                lstm_total = len(features_lstm)
-                lstm_train_end = int(lstm_total * 0.8)
-                lstm_val_end = int(lstm_total * 0.9)
-
-                lstm_train_df = features_lstm.iloc[:lstm_train_end]
-                lstm_val_df = features_lstm.iloc[lstm_train_end:lstm_val_end]
-                lstm_test_df = features_lstm.iloc[lstm_val_end:]
-
-                lstm_train_norm, lstm_scalers = engineer.normalize_features(lstm_train_df, feature_cols)
-                lstm_val_norm = engineer.apply_scalers(lstm_val_df, feature_cols, lstm_scalers)
-                lstm_test_norm = engineer.apply_scalers(lstm_test_df, feature_cols, lstm_scalers)
-
-                dir_train_ds = create_sequences(lstm_train_norm, feature_cols, "direction", seq_len, classification=True)
-                dir_val_ds = create_sequences(lstm_val_norm, feature_cols, "direction", seq_len, classification=True)
-                dir_test_ds = create_sequences(lstm_test_norm, feature_cols, "direction", seq_len, classification=True)
+                _logger.info("Training direction model for %s", pair)
+                dir_train_ds = create_sequences(train_norm, feature_cols, "direction", seq_len, classification=True)
+                dir_val_ds = create_sequences(val_norm, feature_cols, "direction", seq_len, classification=True)
+                dir_test_ds = create_sequences(test_norm, feature_cols, "direction", seq_len, classification=True)
 
                 dir_train_loader = DataLoader(dir_train_ds, batch_size=batch_size, shuffle=True)
                 dir_val_loader = DataLoader(dir_val_ds, batch_size=batch_size, shuffle=False)
@@ -284,7 +267,7 @@ def run_model_training() -> None:
 
                 scaler_path = artifacts_dir / f"scaler_{sym_safe}.json"
                 with open(scaler_path, "w") as f:
-                    json.dump(lstm_scalers, f, indent=2)
+                    json.dump(scalers, f, indent=2)
 
                 metrics_path = artifacts_dir / f"metrics_{sym_safe}.json"
 
@@ -326,9 +309,8 @@ def run_model_training() -> None:
 
                 if last_val > 0.68 and dir_test_acc < 55:
                     _logger.info(
-                        "Regression LSTM shows no learnable signal in current feature set "
-                        "for %s — confirmed via 3000-candle retrain with L2 reg. "
-                        "Recommend continuing with Option A sentiment-primary strategy.",
+                        "Direction LSTM shows no learnable signal in current feature set "
+                        "for %s. Recommend continuing with sentiment-primary strategy.",
                         pair,
                     )
 
