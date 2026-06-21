@@ -1,8 +1,8 @@
 """LangGraph agent pipeline builder and cycle runner.
 
-Wires the four agents (Manager, Risk, Execution, Portfolio Monitor)
-into a sequential StateGraph and provides ``run_cycle()`` as the
-top-level entry point for the trading loop.
+Wires the five agent nodes (MonitorExits, Manager, Risk, Execution,
+MonitorUpdate) into a sequential StateGraph and provides ``run_cycle()``
+as the top-level entry point for the trading loop.
 """
 
 from datetime import datetime
@@ -26,12 +26,18 @@ def build_agent_pipeline() -> StateGraph:
 
     Nodes execute in strict order:
 
-        START → manager → risk → execution → monitor → END
+        START → monitor_exits → manager → risk → execution → monitor_update → END
+
+    ``monitor_exits`` runs first so stop-loss / take-profit breaches are
+    detected before the Manager Agent generates new trades.  Auto-exit
+    trades flow through Risk (bypassed via ``is_auto_exit``) and Execution
+    in the same cycle.  ``monitor_update`` runs last to record the final
+    P&L and updated holdings after all trades have been executed.
 
     Returns:
         A compiled :class:`StateGraph` ready for ``.invoke()``.
     """
-    _logger.info("Building agent pipeline")
+    _logger.info("Building agent pipeline (exits-first ordering)")
 
     manager = ManagerAgent()
     risk = RiskAgent()
@@ -40,19 +46,21 @@ def build_agent_pipeline() -> StateGraph:
 
     graph = StateGraph(AgentState)
 
+    graph.add_node("monitor_exits", monitor.check_exits_only)
     graph.add_node("manager", manager.run)
     graph.add_node("risk", risk.run)
     graph.add_node("execution", execution.run)
-    graph.add_node("monitor", monitor.run)
+    graph.add_node("monitor_update", monitor.run)
 
-    graph.set_entry_point("manager")
+    graph.set_entry_point("monitor_exits")
+    graph.add_edge("monitor_exits", "manager")
     graph.add_edge("manager", "risk")
     graph.add_edge("risk", "execution")
-    graph.add_edge("execution", "monitor")
-    graph.add_edge("monitor", END)
+    graph.add_edge("execution", "monitor_update")
+    graph.add_edge("monitor_update", END)
 
     compiled = graph.compile()
-    _logger.info("Agent pipeline compiled successfully")
+    _logger.info("Agent pipeline compiled successfully (5 nodes)")
     return compiled
 
 
@@ -60,7 +68,7 @@ def run_cycle(
     pipeline_data: dict[str, Any],
     portfolio_summary: dict[str, Any] | None = None,
 ) -> AgentState:
-    """Execute one full trading cycle through all four agents.
+    """Execute one full trading cycle through all five agent nodes.
 
     Args:
         pipeline_data: Output from ``DataPipeline.run()`` keyed by pair.

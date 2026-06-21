@@ -26,8 +26,28 @@ class PortfolioMonitor:
         _logger.info("Initialising PortfolioMonitor")
         self.binance = BinanceClient()
 
+    def check_exits_only(self, state: AgentState) -> AgentState:
+        """First pipeline node — detect SL/TP breaches and append exit trades.
+
+        Runs only :meth:`check_exit_conditions` without any P&L or position
+        tracking. Auto-exit trades are appended to ``state["proposed_trades"]``
+        so they flow through Risk and Execution in the same cycle.
+
+        Args:
+            state: Current agent state.
+
+        Returns:
+            Updated state with any auto-exit trades appended to proposed_trades.
+        """
+        _logger.info("MonitorExits node — cycle %s", state["cycle_id"])
+        state = self.check_exit_conditions(state)
+        state["cycle_log"].append(
+            f"[{datetime.utcnow().isoformat()}] MonitorExits: exit checks complete"
+        )
+        return state
+
     def run(self, state: AgentState) -> AgentState:
-        """Update positions, check auto-exit, compute portfolio metrics.
+        """Final pipeline node — update positions, compute portfolio metrics.
 
         Args:
             state: Current LangGraph agent state with ``portfolio_summary``
@@ -37,9 +57,7 @@ class PortfolioMonitor:
         Returns:
             Updated state with ``portfolio_summary`` populated.
         """
-        _logger.info("PortfolioMonitor run — cycle %s", state["cycle_id"])
-
-        state = self.check_exit_conditions(state)
+        _logger.info("MonitorUpdate node — cycle %s", state["cycle_id"])
 
         portfolio = state.get("portfolio_summary", {})
         holdings_raw: dict[str, Any] = portfolio.get("holdings", {})

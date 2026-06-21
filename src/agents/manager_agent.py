@@ -113,6 +113,16 @@ class ManagerAgent:
             )
 
         if not trading_paused:
+            exiting_symbols = {
+                t.symbol for t in state.get("proposed_trades", [])
+                if getattr(t, "is_auto_exit", False)
+            }
+            if exiting_symbols:
+                _logger.info(
+                    "Auto-exit in progress for %s — skipping new proposals for these symbols",
+                    exiting_symbols,
+                )
+
             for sig in top_signals:
                 if abs(sig.sentiment_score) < MIN_SENTIMENT_STRENGTH:
                     _logger.info(
@@ -120,12 +130,23 @@ class ManagerAgent:
                         sig.symbol, sig.sentiment_score,
                     )
                     continue
+                if sig.symbol in exiting_symbols:
+                    _logger.info(
+                        "%s skipped — auto-exit already in progress this cycle",
+                        sig.symbol,
+                    )
+                    continue
                 trade = self._signal_to_trade(sig, portfolio_value, state)
                 if trade is not None:
                     proposed_trades.append(trade)
 
         state["signals"] = signals
-        state["proposed_trades"] = proposed_trades
+        # Preserve any auto-exit trades from monitor_exits node
+        existing_auto_exits = [
+            t for t in state.get("proposed_trades", [])
+            if getattr(t, "is_auto_exit", False)
+        ]
+        state["proposed_trades"] = existing_auto_exits + proposed_trades
         state["cycle_log"].append(
             f"[{datetime.utcnow().isoformat()}] ManagerAgent: "
             f"generated {len(signals)} signals, "
