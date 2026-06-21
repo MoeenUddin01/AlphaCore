@@ -145,6 +145,14 @@ class RiskAgent:
                 _logger.warning("Rejected %s (duplicate position)", trade.symbol)
                 continue
 
+            if trade.side == "SELL" and trade.symbol not in existing_symbols:
+                rejection_reasons.append({
+                    "symbol": trade.symbol,
+                    "reason": "Cannot SELL — no existing holding for this symbol (spot trading)",
+                })
+                _logger.warning("Rejected %s (SELL without holding)", trade.symbol)
+                continue
+
             # Holdings from state are all long positions.
             # For a BUY proposal, every existing holding is a same-direction position.
             # For a SELL proposal, existing holdings are opposite direction.
