@@ -44,33 +44,50 @@ class Predictor:
         self.classifier_models: dict[str, nn.Module] = {}
         self.scalers: dict[str, dict[str, dict[str, float]]] = {}
 
+        ckpt_dir = Path(settings.MODEL_CHECKPOINT_DIR)
         artifacts_dir = Path("artifacts")
         for symbol in settings.TRADING_PAIRS:
             sym = format_pair_for_binance(symbol)
 
             model = LSTMModel(input_size=len(_FEATURE_COLS))
             trainer = LSTMTrainer(model=model)
-            found = trainer.load_checkpoint(sym)
-            if found:
-                _logger.info("Direction checkpoint loaded for %s", sym)
+            ckpt_meta = trainer.load_checkpoint(sym)
+            if ckpt_meta is not None:
+                _logger.info(
+                    "✓ %s | LSTM direction | checkpoint loaded: %s/%s_lstm_best.pt "
+                    "(epoch %d, val_loss=%.4f)",
+                    sym, ckpt_dir, sym, ckpt_meta["epoch"], ckpt_meta["val_loss"],
+                )
             else:
-                _logger.warning("No direction checkpoint for %s — using fresh model", sym)
+                _logger.warning(
+                    "✗ %s | LSTM direction | no checkpoint in %s/ — "
+                    "using FRESH random weights",
+                    sym, ckpt_dir,
+                )
             self.models[sym] = model
 
             classifier = LSTMClassifier(input_size=len(_FEATURE_COLS))
             clf_trainer = LSTMClassifierTrainer(model=classifier)
-            clf_found = clf_trainer.load_checkpoint(sym)
-            if clf_found:
-                _logger.info("Classifier checkpoint loaded for %s", sym)
+            clf_meta = clf_trainer.load_checkpoint(sym)
+            if clf_meta is not None:
+                _logger.info(
+                    "✓ %s | LSTM classifier | checkpoint loaded: %s/%s_classifier_best.pt "
+                    "(epoch %d, val_loss=%.4f)",
+                    sym, ckpt_dir, sym, clf_meta["epoch"], clf_meta["val_loss"],
+                )
             else:
-                _logger.warning("No classifier checkpoint for %s — using fresh model", sym)
+                _logger.warning(
+                    "✗ %s | LSTM classifier | no checkpoint in %s/ — "
+                    "using FRESH random weights",
+                    sym, ckpt_dir,
+                )
             self.classifier_models[sym] = classifier
 
             scaler_path = artifacts_dir / f"scaler_{sym}.json"
             if scaler_path.exists():
                 with open(scaler_path) as f:
                     self.scalers[sym] = json.load(f)
-                _logger.info("Scaler loaded for %s", sym)
+                _logger.info("✓ %s | scaler loaded: %s", sym, scaler_path)
             else:
                 self.scalers[sym] = {}
 

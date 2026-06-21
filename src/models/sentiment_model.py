@@ -29,7 +29,22 @@ class SentimentModel:
             "ProsusAI/finbert"
         )
         self.model.eval()
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            try:
+                cc = torch.cuda.get_device_capability()
+                if cc[0] < 7 or (cc[0] == 7 and cc[1] < 5):
+                    _logger.warning(
+                        "GPU CC %d.%d < 7.5 — incompatible with PyTorch CUDA build. "
+                        "Falling back to CPU.",
+                        cc[0], cc[1],
+                    )
+                    self._device = torch.device("cpu")
+                else:
+                    self._device = torch.device("cuda")
+            except Exception:
+                self._device = torch.device("cpu")
+        else:
+            self._device = torch.device("cpu")
         self.model.to(self._device)
         _logger.info("FinBERT loaded on %s", self._device)
 

@@ -5,6 +5,7 @@ checkpointing, and evaluation utilities.
 """
 
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -206,20 +207,21 @@ class LSTMTrainer:
         )
         _logger.info("Checkpoint saved to %s (epoch %d, val_loss=%.6f)", path, epoch, val_loss)
 
-    def load_checkpoint(self, symbol: str) -> bool:
+    def load_checkpoint(self, symbol: str) -> dict[str, Any] | None:
         """Load the best checkpoint for *symbol* if it exists.
 
         Args:
             symbol: Trading pair symbol (e.g. ``BTCUSDT``).
 
         Returns:
-            True if a checkpoint was found and loaded, False otherwise.
+            Dict with ``epoch`` and ``val_loss`` if loaded, or None if
+            no checkpoint file was found.
         """
         safe_symbol = format_pair_for_binance(symbol)
         path = self.checkpoint_dir / f"{safe_symbol}_lstm_best.pt"
         if not path.exists():
             _logger.warning("No checkpoint found at %s", path)
-            return False
+            return None
 
         checkpoint = torch.load(path, map_location="cpu")
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -230,7 +232,7 @@ class LSTMTrainer:
             checkpoint["epoch"],
             checkpoint["val_loss"],
         )
-        return True
+        return {"epoch": checkpoint["epoch"], "val_loss": checkpoint["val_loss"]}
 
 
 class LSTMClassifierTrainer:
@@ -444,7 +446,7 @@ class LSTMClassifierTrainer:
         )
         _logger.info("Checkpoint saved to %s (epoch %d, val_loss=%.6f)", path, epoch, val_loss)
 
-    def load_checkpoint(self, symbol: str) -> bool:
+    def load_checkpoint(self, symbol: str) -> dict[str, Any] | None:
         """Load the best classifier checkpoint for *symbol* if it exists.
 
         Looks for a file with the ``_classifier`` suffix.
@@ -453,13 +455,14 @@ class LSTMClassifierTrainer:
             symbol: Trading pair symbol (e.g. ``BTCUSDT``).
 
         Returns:
-            True if a checkpoint was found and loaded, False otherwise.
+            Dict with ``epoch`` and ``val_loss`` if loaded, or None if
+            no checkpoint file was found.
         """
         safe_symbol = format_pair_for_binance(symbol)
         path = self.checkpoint_dir / f"{safe_symbol}_classifier_best.pt"
         if not path.exists():
             _logger.warning("No classifier checkpoint found at %s", path)
-            return False
+            return None
 
         checkpoint = torch.load(path, map_location="cpu")
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -470,4 +473,4 @@ class LSTMClassifierTrainer:
             checkpoint["epoch"],
             checkpoint["val_loss"],
         )
-        return True
+        return {"epoch": checkpoint["epoch"], "val_loss": checkpoint["val_loss"]}

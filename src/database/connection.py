@@ -7,7 +7,7 @@ table initialisation, and a liveness check for the database.
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.utils.config import settings
@@ -60,6 +60,7 @@ def init_db() -> None:
     from src.database.models import (  # noqa: F401 — register models
         CycleRun,
         PortfolioSnapshot,
+        PortfolioState,
         Position,
         Signal,
         Trade,
@@ -70,28 +71,41 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     tables_after = len(Base.metadata.tables)
 
-    with engine.connect() as conn:
-        result = conn.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
-        )
-        trades_exists = result.scalar() is not None
-        if trades_exists:
-            col_result = conn.execute(
-                text("PRAGMA table_info(trades)")
-            )
-            cols = {row[1] for row in col_result.fetchall()}
-            if "is_sentiment_driven" not in cols:
-                _logger.warning(
-                    "The 'trades' table is missing column 'is_sentiment_driven'. "
-                    "Delete the old .db file and let it recreate fresh — "
-                    "this is pre-production paper trading, safe to do so."
-                )
+    _migrate_trades_table(engine)
 
     _logger.info(
         "Database ready — %d table(s) registered, %d created",
         tables_after,
         tables_after - tables_before,
     )
+
+
+def _migrate_trades_table(db_engine: Engine) -> None:
+    """Add missing columns to the ``trades`` table if they don't exist.
+
+    SQLite's ``CREATE TABLE`` is called once — subsequent model changes
+    require manual ALTER TABLE. This handles the known additions.
+    """
+    with db_engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
+        )
+        if result.scalar() is None:
+            return
+
+        col_result = conn.execute(text("PRAGMA table_info(trades)"))
+        cols = {row[1] for row in col_result.fetchall()}
+
+        _MISSING_COLS: dict[str, str] = {
+            "is_sentiment_driven": "BOOLEAN NOT NULL DEFAULT 1",
+            "fee_paid": "NUMERIC(20, 8)",
+        }
+
+        for col_name, col_def in _MISSING_COLS.items():
+            if col_name not in cols:
+                _logger.warning("Adding missing column '%s' to trades table", col_name)
+                conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col_name} {col_def}"))
+        conn.commit()
 
 
 def check_db_connection() -> bool:

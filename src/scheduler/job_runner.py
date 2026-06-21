@@ -78,11 +78,14 @@ class SchedulerRunner:
         self._logger.info("Initialising database")
         init_db()
 
-        self._logger.info("Starting initial model training")
+        # Skip initial retraining — we already have 10 trained checkpoints
+        # from the previous training run. Run one trading cycle immediately
+        # to verify Predictor loads all checkpoints.
+        self._logger.info("Running initial trading cycle (Predictor init + checkpoint verification)")
         try:
-            run_model_training()
+            run_trading_cycle()
         except Exception:
-            self._logger.exception("Initial model training failed — continuing")
+            self._logger.exception("Initial trading cycle failed — continuing")
 
         self._logger.info("Scheduled jobs:")
         for job in self.scheduler.get_jobs():

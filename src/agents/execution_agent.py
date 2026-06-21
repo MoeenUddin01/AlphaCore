@@ -19,6 +19,18 @@ from src.utils.logger import get_logger
 _logger = get_logger(__name__)
 
 
+def _round_down_to_step(value: Decimal, step: Decimal) -> Decimal:
+    """Round *value* DOWN to the nearest *step* increment.
+
+    Uses ``Decimal //`` (floor division) then multiplies back, so the
+    result is always <= *value*. This is critical for LOT_SIZE compliance
+    — rounding up could exceed the intended position size.
+    """
+    if step == Decimal("0"):
+        return value
+    return (value // step) * step
+
+
 class ExecutionAgent:
     """Order execution agent — places market orders on Binance Testnet."""
 
@@ -49,16 +61,17 @@ class ExecutionAgent:
             if executed is not None:
                 state["executed_trades"].append(executed)
 
+        filled = sum(1 for et in state["executed_trades"] if et.status == "FILLED")
+        failed = sum(1 for et in state["executed_trades"] if et.status == "FAILED")
+        rejected = sum(1 for et in state["executed_trades"] if et.status == "REJECTED_LOT_SIZE")
         state["cycle_log"].append(
             f"[{datetime.utcnow().isoformat()}] ExecutionAgent: "
-            f"executed {sum(1 for et in state['executed_trades'] if et.status == 'FILLED')}/"
-            f"{len(approved)} trades "
-            f"({sum(1 for et in state['executed_trades'] if et.status == 'FAILED')} failed)"
+            f"executed {filled}/{len(approved)} trades "
+            f"({failed} failed, {rejected} rejected)"
         )
         _logger.info(
-            "ExecutionAgent done — %d/%d executed",
-            len(state["executed_trades"]),
-            len(approved),
+            "ExecutionAgent done — %d/%d executed (%d failed, %d rejected)",
+            len(state["executed_trades"]), len(approved), failed, rejected,
         )
         return state
 
@@ -98,7 +111,44 @@ class ExecutionAgent:
             fill_price = live_price * (Decimal("1") - Decimal(str(slippage_pct)))
 
         fill_price = fill_price.quantize(Decimal("0.01"))
-        qty = trade.quantity
+
+        # --- LOT_SIZE + MIN_NOTIONAL compliance ---
+        filters = self.binance.get_symbol_filters(symbol)
+        qty_raw = trade.quantity
+        qty = qty_raw
+
+        step_size = filters.get("lot_size", {}).get("stepSize")
+        if step_size and step_size > Decimal("0"):
+            qty_before = qty
+            qty = _round_down_to_step(qty, step_size)
+            if qty != qty_before:
+                _logger.info(
+                    "%s quantity rounded down from %s to %s (step=%s)",
+                    sym_clean, qty_before, qty, step_size,
+                )
+
+        min_notional = filters.get("min_notional", {}).get("minNotional")
+        if min_notional and min_notional > Decimal("0"):
+            notional = qty * fill_price
+            _logger.info(
+                "%s notional check: qty=%s price=%s notional=%s min=%s",
+                sym_clean, qty, fill_price, notional, min_notional,
+            )
+            if notional < min_notional:
+                _logger.warning(
+                    "%s: quantity %s below exchange minimum notional %s, skipping order",
+                    sym_clean, qty, min_notional,
+                )
+                return ExecutedTrade(
+                    proposal=trade,
+                    executed_price=fill_price,
+                    executed_quantity=Decimal("0"),
+                    order_id="",
+                    status="REJECTED_LOT_SIZE",
+                    timestamp=state["timestamp"],
+                    fee_paid=Decimal("0"),
+                    pnl=Decimal("0"),
+                )
 
         _logger.info(
             "Placing %s market order: %s %s @ ~%s (live=%s, slippage=%.4f%%)",

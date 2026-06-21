@@ -16,7 +16,7 @@ from filelock import FileLock, Timeout
 from src.agents import run_cycle
 from src.data.data_pipeline import DataPipeline
 from src.database.connection import check_db_connection, init_db
-from src.database.crud import get_portfolio_history, is_cycle_already_processed, save_cycle, update_positions
+from src.database.crud import get_current_portfolio_state, is_cycle_already_processed, save_cycle, update_positions
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -52,13 +52,13 @@ def run_trading_cycle() -> None:
 
     try:
         pipeline_data = DataPipeline().run()
-        history = get_portfolio_history(limit=1)
-        if history:
-            portfolio_summary: dict[str, Any] = {
-                "total_value": Decimal(str(history[0].get("total_value", 10000))),
-            }
-        else:
-            portfolio_summary = {"total_value": Decimal("10000")}
+        portfolio_summary: dict[str, Any] = get_current_portfolio_state()
+
+        _logger.info(
+            "Portfolio state loaded — total_value=%s, holdings=%s",
+            portfolio_summary.get("total_value"),
+            list(portfolio_summary.get("holdings", {}).keys()),
+        )
 
         final_state = run_cycle(pipeline_data, portfolio_summary)
         cycle_id = save_cycle(final_state)
@@ -179,7 +179,9 @@ def run_model_training() -> None:
         for pair in settings.TRADING_PAIRS:
             _logger.info("Training models for %s", pair)
             try:
-                ohlcv = binance.get_ohlcv(pair, interval="1h", limit=1500)
+                # Training uses Mainnet read-only historical data (deeper history).
+                # Live trading remains exclusively on Testnet.
+                ohlcv = binance.get_historical_ohlcv_mainnet(pair, interval="1h", limit=3000)
                 features = engineer.compute_features(ohlcv)
                 features["direction"] = (features["close"].pct_change().shift(-1) >= 0).astype(int)
                 features = features.dropna()

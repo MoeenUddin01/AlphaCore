@@ -7,6 +7,7 @@ portfolio snapshots.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, Text, JSON
 
@@ -103,6 +104,20 @@ class Position(Base):
     avg_entry_price = Column(Numeric(20, 8), nullable=False)
     current_price = Column(Numeric(20, 8), nullable=False)
     unrealised_pnl = Column(Numeric(20, 8), nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class PortfolioState(Base):
+    """Singleton tracking portfolio-level state across cycles.
+
+    Only one row exists (id='singleton'). Stores the peak portfolio
+    value for drawdown calculations.
+    """
+
+    __tablename__ = "portfolio_state"
+
+    id = Column(String(20), primary_key=True, default="singleton")
+    peak_value = Column(Numeric(20, 8), nullable=False, default=Decimal("0"))
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 

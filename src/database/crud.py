@@ -13,7 +13,8 @@ from sqlalchemy import and_, desc, func
 
 from src.agents.agent_state import AgentState
 from src.database.connection import get_db
-from src.database.models import CycleRun, PortfolioSnapshot, Position, Signal, Trade
+from src.database.models import CycleRun, PortfolioSnapshot, PortfolioState, Position, Signal, Trade
+from src.utils.config import settings
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -149,17 +150,130 @@ def update_positions(state: AgentState) -> None:
     with get_db() as db:
         for pos in positions_list:
             symbol = pos.get("symbol", "")
-            position = Position(
-                symbol=symbol,
-                quantity=Decimal(str(pos.get("quantity", 0))),
-                avg_entry_price=Decimal(str(pos.get("avg_entry_price", 0))),
-                current_price=Decimal(str(pos.get("current_price", 0))),
-                unrealised_pnl=Decimal(str(pos.get("unrealized_pnl", 0))),
-                updated_at=now,
-            )
-            db.merge(position)
+            existing = db.query(Position).filter(Position.symbol == symbol).first()
+            if existing:
+                existing.quantity = Decimal(str(pos.get("quantity", 0)))
+                existing.avg_entry_price = Decimal(str(pos.get("avg_entry_price", 0)))
+                existing.current_price = Decimal(str(pos.get("current_price", 0)))
+                existing.unrealised_pnl = Decimal(str(pos.get("unrealized_pnl", 0)))
+                existing.updated_at = now
+            else:
+                position = Position(
+                    symbol=symbol,
+                    quantity=Decimal(str(pos.get("quantity", 0))),
+                    avg_entry_price=Decimal(str(pos.get("avg_entry_price", 0))),
+                    current_price=Decimal(str(pos.get("current_price", 0))),
+                    unrealised_pnl=Decimal(str(pos.get("unrealized_pnl", 0))),
+                    updated_at=now,
+                )
+                db.add(position)
 
     _logger.info("Upserted %d position(s)", len(positions_list))
+
+
+def get_current_portfolio_state() -> dict[str, Any]:
+    """Build a complete portfolio summary from database state and live prices.
+
+    Queries the Position table for open positions, fetches live prices,
+    retrieves SL/TP from the most recent trade per symbol, and computes
+    total_value, cash, holdings, peak_value, and drawdown_pct.
+
+    Returns:
+        Dict with keys: total_value, cash, holdings, peak_value, drawdown_pct.
+    """
+    from src.data.binance_client import BinanceClient
+
+    binance = BinanceClient()
+    initial_capital = settings.PORTFOLIO_INITIAL_CAPITAL
+    total_realised_pnl = Decimal("0")
+
+    with get_db() as db:
+        positions = db.query(Position).all()
+
+        holdings: dict[str, dict[str, Any]] = {}
+        total_position_value = Decimal("0")
+
+        for pos in positions:
+            sym = pos.symbol
+            qty = pos.quantity
+            if qty <= 0:
+                continue
+            avg_entry = pos.avg_entry_price
+
+            try:
+                live_price = Decimal(str(binance.get_current_price(sym)))
+            except Exception:
+                live_price = Decimal(str(pos.current_price)) if pos.current_price else Decimal("0")
+
+            pos_value = qty * live_price
+            total_position_value += pos_value
+            unrealised_pnl = (live_price - avg_entry) * qty if avg_entry > 0 else Decimal("0")
+
+            trade = (
+                db.query(Trade)
+                .filter(
+                    and_(
+                        Trade.symbol == sym,
+                        Trade.side == "BUY",
+                        Trade.status == "FILLED",
+                    )
+                )
+                .order_by(desc(Trade.created_at))
+                .first()
+            )
+            sl_price = Decimal(str(trade.stop_loss_price)) if trade and trade.stop_loss_price else Decimal("0")
+            tp_price = Decimal(str(trade.take_profit_price)) if trade and trade.take_profit_price else Decimal("0")
+
+            holdings[sym] = {
+                "quantity": qty,
+                "avg_entry_price": avg_entry,
+                "current_price": live_price,
+                "unrealized_pnl": unrealised_pnl,
+                "value": pos_value,
+                "stop_loss_price": sl_price,
+                "take_profit_price": tp_price,
+            }
+
+        pstate = db.query(PortfolioState).filter(PortfolioState.id == "singleton").first()
+        if pstate is None:
+            peak_value = initial_capital
+            db.add(PortfolioState(id="singleton", peak_value=peak_value, updated_at=datetime.utcnow()))
+        else:
+            peak_value = pstate.peak_value
+
+        latest_snapshot = (
+            db.query(PortfolioSnapshot)
+            .order_by(desc(PortfolioSnapshot.created_at))
+            .first()
+        )
+        if latest_snapshot:
+            last_total_value = Decimal(str(latest_snapshot.total_value))
+            total_realised_pnl = Decimal(str(latest_snapshot.realised_pnl)) if latest_snapshot.realised_pnl else Decimal("0")
+        else:
+            last_total_value = initial_capital
+            total_realised_pnl = Decimal("0")
+
+    cash = last_total_value - total_position_value
+    total_value = cash + total_position_value
+
+    if total_value > peak_value:
+        peak_value = total_value
+        with get_db() as db:
+            pstate = db.query(PortfolioState).filter(PortfolioState.id == "singleton").first()
+            if pstate:
+                pstate.peak_value = peak_value
+                pstate.updated_at = datetime.utcnow()
+
+    drawdown_pct = ((peak_value - total_value) / peak_value * 100) if peak_value > 0 else Decimal("0")
+
+    return {
+        "total_value": total_value,
+        "cash": cash,
+        "holdings": holdings,
+        "peak_value": peak_value,
+        "drawdown_pct": drawdown_pct,
+        "total_realised_pnl": total_realised_pnl,
+    }
 
 
 def get_portfolio_history(limit: int = 100) -> list[dict[str, Any]]:
@@ -229,6 +343,9 @@ def get_trade_history(
                 "order_id": r.order_id,
                 "status": r.status,
                 "reasoning": r.reasoning,
+                "is_sentiment_driven": bool(r.is_sentiment_driven) if r.is_sentiment_driven is not None else None,
+                "fee_paid": float(r.fee_paid) if r.fee_paid else None,
+                "signal_confidence": float(r.signal_confidence) if r.signal_confidence else None,
                 "pnl": float(r.pnl) if r.pnl else None,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             })
@@ -396,10 +513,29 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
         ``avg_sentiment_score_losers``, ``is_statistically_ready``.
     """
     import datetime as dt
+    from collections import Counter
 
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=days)
 
     with get_db() as db:
+        # Log breakdown of all sentiment-driven trades by status for auditability.
+        all_statuses = (
+            db.query(Trade.status)
+            .filter(
+                and_(
+                    Trade.is_sentiment_driven == True,
+                    Trade.created_at >= cutoff,
+                )
+            )
+            .all()
+        )
+        status_counts = Counter(row[0] for row in all_statuses)
+        _logger.info(
+            "Sentiment trade status breakdown (last %d days): %s",
+            days,
+            dict(status_counts),
+        )
+
         rows = (
             db.query(Trade)
             .filter(
@@ -412,9 +548,18 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
             .all()
         )
 
-    total = len(rows)
-    winners = [r for r in rows if r.pnl is not None and r.pnl > 0]
-    losers = [r for r in rows if r.pnl is not None and r.pnl <= 0]
+        # Materialise all needed attributes while session is open.
+        _rows: list[dict[str, Any]] = [
+            {
+                "pnl": float(r.pnl) if r.pnl is not None else None,
+                "signal_confidence": float(r.signal_confidence) if r.signal_confidence is not None else None,
+            }
+            for r in rows
+        ]
+
+    total = len(_rows)
+    winners = [r for r in _rows if r["pnl"] is not None and r["pnl"] > 0]
+    losers = [r for r in _rows if r["pnl"] is not None and r["pnl"] <= 0]
 
     total_sentiment_trades = total
     winning_trades = len(winners)
@@ -422,28 +567,20 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
     win_rate_pct = (winning_trades / total * 100) if total > 0 else 0.0
 
     avg_win_amount = (
-        sum(float(r.pnl) for r in winners) / winning_trades
+        sum(r["pnl"] for r in winners) / winning_trades
         if winning_trades > 0
         else 0.0
     )
     avg_loss_amount = (
-        sum(float(r.pnl) for r in losers) / losing_trades
+        sum(r["pnl"] for r in losers) / losing_trades
         if losing_trades > 0
         else 0.0
     )
 
-    total_pnl = sum(float(r.pnl) for r in rows if r.pnl is not None)
+    total_pnl = sum(r["pnl"] for r in _rows if r["pnl"] is not None)
 
-    scores_winners = []
-    for r in winners:
-        c = r.signal_confidence
-        if c is not None:
-            scores_winners.append(float(c))
-    scores_losers = []
-    for r in losers:
-        c = r.signal_confidence
-        if c is not None:
-            scores_losers.append(float(c))
+    scores_winners = [r["signal_confidence"] for r in winners if r["signal_confidence"] is not None]
+    scores_losers = [r["signal_confidence"] for r in losers if r["signal_confidence"] is not None]
 
     avg_sentiment_score_winners = (
         sum(scores_winners) / len(scores_winners)

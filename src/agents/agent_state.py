@@ -108,7 +108,7 @@ class ExecutedTrade:
     """Exchange-assigned order identifier."""
 
     status: str
-    """Order status — ``"FILLED"``, ``"PARTIALLY_FILLED"``, or ``"FAILED"``."""
+    """Order status — ``"FILLED"``, ``"PARTIALLY_FILLED"``, ``"REJECTED_LOT_SIZE"``, or ``"FAILED"``."""
 
     timestamp: datetime
     """When the order was executed (UTC)."""

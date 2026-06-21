@@ -2,6 +2,9 @@
 
 Computes portfolio-level metrics including unrealised/realised P&L,
 drawdown from peak, and allocation drift detection for rebalancing.
+All state is read from the portfolio_summary passed in via the agent
+state (populated by get_current_portfolio_state() in jobs.py), making
+this agent stateless across cycles.
 """
 
 from datetime import datetime
@@ -11,7 +14,6 @@ from typing import Any
 from src.agents.agent_state import AgentState, ProposedTrade
 from src.data.binance_client import BinanceClient
 from src.utils.config import settings
-from src.utils.helpers import to_decimal
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -23,16 +25,14 @@ class PortfolioMonitor:
     def __init__(self) -> None:
         _logger.info("Initialising PortfolioMonitor")
         self.binance = BinanceClient()
-        self.positions: dict[str, dict[str, Any]] = {}
-        self.peak_portfolio_value: Decimal = Decimal("0")
-        self._total_realised_pnl: Decimal = Decimal("0")
-        self._initial_capital: Decimal = settings.PORTFOLIO_INITIAL_CAPITAL
 
     def run(self, state: AgentState) -> AgentState:
         """Update positions, check auto-exit, compute portfolio metrics.
 
         Args:
-            state: Current LangGraph agent state with ``executed_trades``.
+            state: Current LangGraph agent state with ``portfolio_summary``
+                (populated by get_current_portfolio_state()) and
+                ``executed_trades`` from the current cycle.
 
         Returns:
             Updated state with ``portfolio_summary`` populated.
@@ -41,28 +41,31 @@ class PortfolioMonitor:
 
         state = self.check_exit_conditions(state)
 
-        self._update_positions(state.get("executed_trades", []))
+        portfolio = state.get("portfolio_summary", {})
+        holdings_raw: dict[str, Any] = portfolio.get("holdings", {})
+        peak_value = Decimal(str(portfolio.get("peak_value", settings.PORTFOLIO_INITIAL_CAPITAL)))
+        total_realised_pnl = Decimal(str(portfolio.get("total_realised_pnl", 0)))
+
+        # Build positions from holdings + current cycle's executed trades
+        positions = self._merge_positions(holdings_raw, state.get("executed_trades", []))
 
         total_position_value = Decimal("0")
         position_details: list[dict[str, Any]] = []
         rebalance_alerts: list[str] = []
 
-        for symbol, pos in self.positions.items():
+        for symbol, pos in positions.items():
             try:
                 current_price = self.binance.get_current_price(symbol)
             except Exception as exc:
                 _logger.warning("Failed to fetch price for %s: %s", symbol, exc)
-                current_price = pos.get("avg_entry_price", Decimal("0"))
+                current_price = pos.get("current_price") or pos.get("avg_entry_price", Decimal("0"))
+                if not isinstance(current_price, Decimal):
+                    current_price = Decimal(str(current_price))
 
             pos_value = pos["quantity"] * current_price
             avg_entry = pos["avg_entry_price"]
             unrealised_pnl = (current_price - avg_entry) * pos["quantity"] if avg_entry > 0 else Decimal("0")
             return_pct = ((current_price - avg_entry) / avg_entry * 100) if avg_entry > 0 else Decimal("0")
-
-            pos["current_price"] = current_price
-            pos["value"] = pos_value
-            pos["unrealized_pnl"] = unrealised_pnl
-            pos["return_pct"] = return_pct
 
             total_position_value += pos_value
 
@@ -76,22 +79,28 @@ class PortfolioMonitor:
                 "return_pct": float(return_pct),
             })
 
-        cash = settings.PORTFOLIO_INITIAL_CAPITAL - total_position_value
+        cash = Decimal(str(portfolio.get("total_value", settings.PORTFOLIO_INITIAL_CAPITAL))) - total_position_value
         total_value = total_position_value + cash
         total_unrealised_pnl = sum(Decimal(str(p.get("unrealized_pnl", 0))) for p in position_details)
         total_return_pct = (
-            (total_value - self._initial_capital) / self._initial_capital * 100
-        ) if self._initial_capital > 0 else Decimal("0")
+            (total_value - Decimal(str(settings.PORTFOLIO_INITIAL_CAPITAL)))
+            / Decimal(str(settings.PORTFOLIO_INITIAL_CAPITAL)) * 100
+        ) if settings.PORTFOLIO_INITIAL_CAPITAL > 0 else Decimal("0")
 
-        if total_value > self.peak_portfolio_value:
-            self.peak_portfolio_value = total_value
+        # Add current cycle's realised PnL from SELL trades
+        current_realised = self._compute_realised_pnl(state.get("executed_trades", []), holdings_raw)
+        total_realised_pnl += current_realised
+
+        if total_value > peak_value:
+            peak_value = total_value
 
         drawdown_pct = (
-            (self.peak_portfolio_value - total_value) / self.peak_portfolio_value * 100
-        ) if self.peak_portfolio_value > 0 else Decimal("0")
+            (peak_value - total_value) / peak_value * 100
+        ) if peak_value > 0 else Decimal("0")
 
-        num_positions = len(self.positions)
+        num_positions = len(positions)
         target_per_position_pct = Decimal("100") / max(num_positions, 1)
+
         for pos in position_details:
             alloc_pct = Decimal(str(pos["value"])) / total_value * 100 if total_value > 0 else Decimal("0")
             drift = abs(alloc_pct - target_per_position_pct)
@@ -108,12 +117,13 @@ class PortfolioMonitor:
             "cash": round(float(cash), 2),
             "total_value": round(float(total_value), 2),
             "total_unrealized_pnl": round(float(total_unrealised_pnl), 2),
-            "total_realised_pnl": round(float(self._total_realised_pnl), 2),
+            "total_realised_pnl": round(float(total_realised_pnl), 2),
             "return_pct": round(float(total_return_pct), 2),
-            "peak_value": round(float(self.peak_portfolio_value), 2),
+            "peak_value": round(float(peak_value), 2),
             "drawdown_pct": round(float(drawdown_pct), 2),
             "num_positions": num_positions,
             "positions": position_details,
+            "holdings": holdings_raw,
             "rebalance_alerts": rebalance_alerts,
         }
 
@@ -137,46 +147,43 @@ class PortfolioMonitor:
     def check_exit_conditions(self, state: AgentState) -> AgentState:
         """Check SL/TP for every open position and generate auto-exit trades.
 
-        Fetches the latest price for each open position and compares it
-        against the stop-loss and take-profit prices from the originating
-        trade. Triggered exits are appended to ``state["proposed_trades"]``
-        with ``is_auto_exit=True`` and bypass the sentiment threshold filter.
+        Reads existing positions from ``state["portfolio_summary"]["holdings"]``
+        (populated by get_current_portfolio_state()). Triggered exits are
+        appended to ``state["proposed_trades"]`` with ``is_auto_exit=True``
+        and bypass the sentiment threshold filter in the Manager Agent.
 
         Args:
-            state: Current agent state.
+            state: Current agent state with ``portfolio_summary["holdings"]``.
 
         Returns:
             Updated state with any auto-exit trades appended.
         """
-        if not self.positions:
+        holdings_raw: dict[str, Any] = state.get("portfolio_summary", {}).get("holdings", {})
+        if not holdings_raw:
             return state
-
-        from src.database.crud import get_open_trade_for_symbol
 
         auto_exits: list[ProposedTrade] = []
 
-        for symbol in list(self.positions.keys()):
+        for symbol, hdata in holdings_raw.items():
+            if not isinstance(hdata, dict):
+                continue
+
             try:
                 current_price = self.binance.get_current_price(symbol)
             except Exception as exc:
                 _logger.warning("check_exit: failed to fetch price for %s: %s", symbol, exc)
                 continue
 
-            trade_data = get_open_trade_for_symbol(symbol)
-            if trade_data is None:
-                continue
-
-            entry_price = Decimal(str(trade_data["entry_price"]))
-            sl_price = Decimal(str(trade_data["stop_loss_price"]))
-            tp_price = Decimal(str(trade_data["take_profit_price"]))
-            pos = self.positions[symbol]
-            qty = pos["quantity"]
+            qty = Decimal(str(hdata.get("quantity", 0)))
+            entry_price = Decimal(str(hdata.get("avg_entry_price", 0)))
+            sl_price = Decimal(str(hdata.get("stop_loss_price", 0)))
+            tp_price = Decimal(str(hdata.get("take_profit_price", 0)))
 
             if qty <= Decimal("0"):
                 continue
 
-            hit_sl = current_price <= sl_price
-            hit_tp = current_price >= tp_price
+            hit_sl = sl_price > Decimal("0") and current_price <= sl_price
+            hit_tp = tp_price > Decimal("0") and current_price >= tp_price
 
             if not hit_sl and not hit_tp:
                 continue
@@ -220,12 +227,34 @@ class PortfolioMonitor:
 
         return state
 
-    def _update_positions(self, executed_trades: list[Any]) -> None:
-        """Rebuild internal positions dict from executed trades.
+    def _merge_positions(
+        self,
+        holdings_raw: dict[str, Any],
+        executed_trades: list[Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Merge existing holdings with current cycle's executed trades.
 
         Args:
-            executed_trades: List of :class:`ExecutedTrade` from state.
+            holdings_raw: Holdings dict from ``portfolio_summary``.
+            executed_trades: Trades executed in the current cycle.
+
+        Returns:
+            Dict of ``{symbol: {quantity, avg_entry_price, ...}}``.
         """
+        positions: dict[str, dict[str, Any]] = {}
+
+        for sym, hdata in holdings_raw.items():
+            if isinstance(hdata, dict):
+                qty = Decimal(str(hdata.get("quantity", 0)))
+                if qty > 0:
+                    positions[sym] = {
+                        "quantity": qty,
+                        "avg_entry_price": Decimal(str(hdata.get("avg_entry_price", 0))),
+                        "current_price": Decimal(str(hdata.get("current_price", 0))),
+                        "value": qty * Decimal(str(hdata.get("current_price", 0))),
+                        "unrealized_pnl": Decimal(str(hdata.get("unrealized_pnl", 0))),
+                    }
+
         for et in executed_trades:
             if et.status != "FILLED":
                 continue
@@ -236,44 +265,60 @@ class PortfolioMonitor:
             price = et.executed_price
 
             if side == "BUY":
-                if symbol in self.positions:
-                    pos = self.positions[symbol]
+                if symbol in positions:
+                    pos = positions[symbol]
                     total_qty = pos["quantity"] + qty
                     total_cost = (pos["quantity"] * pos["avg_entry_price"]) + (qty * price)
                     pos["avg_entry_price"] = total_cost / total_qty if total_qty > 0 else price
                     pos["quantity"] = total_qty
-                    pos["total_entry_fees"] += et.fee_paid
                 else:
-                    self.positions[symbol] = {
+                    positions[symbol] = {
                         "quantity": qty,
                         "avg_entry_price": price,
                         "current_price": price,
                         "value": qty * price,
                         "unrealized_pnl": Decimal("0"),
-                        "return_pct": Decimal("0"),
-                        "total_entry_fees": et.fee_paid,
                     }
                 _logger.info("Position added/updated: %s qty=%s avg_entry=%s", symbol, qty, price)
 
             elif side == "SELL":
-                if symbol in self.positions:
-                    pos = self.positions[symbol]
-                    proportional_entry_fee = (
-                        pos["total_entry_fees"] * (qty / pos["quantity"])
-                        if pos["quantity"] > 0 else Decimal("0")
-                    )
-                    exit_fee = et.fee_paid
-                    realised = (price - pos["avg_entry_price"]) * qty - proportional_entry_fee - exit_fee
-                    self._total_realised_pnl += realised
-                    pos["total_entry_fees"] -= proportional_entry_fee
+                if symbol in positions:
+                    pos = positions[symbol]
                     pos["quantity"] -= qty
-                    _logger.info(
-                        "Position reduced: %s qty=%s realised_pnl=%s "
-                        "(entry_fee=%s exit_fee=%s)",
-                        symbol, qty, realised, proportional_entry_fee, exit_fee,
-                    )
                     if pos["quantity"] <= Decimal("0"):
-                        del self.positions[symbol]
+                        del positions[symbol]
                         _logger.info("Position fully closed: %s", symbol)
+                    else:
+                        _logger.info("Position reduced: %s qty=%s", symbol, pos["quantity"])
                 else:
                     _logger.warning("SELL executed for %s but no open position found", symbol)
+
+        return positions
+
+    def _compute_realised_pnl(
+        self,
+        executed_trades: list[Any],
+        holdings_raw: dict[str, Any],
+    ) -> Decimal:
+        """Compute realised P&L from SELL trades in the current cycle.
+
+        Args:
+            executed_trades: Trades executed in this cycle.
+            holdings_raw: Holdings at the start of the cycle.
+
+        Returns:
+            Total realised P&L as a Decimal.
+        """
+        total = Decimal("0")
+        for et in executed_trades:
+            if et.status != "FILLED" or et.proposal.side != "SELL":
+                continue
+            trade = et.proposal
+            qty = et.executed_quantity
+            price = et.executed_price
+            hdata = holdings_raw.get(trade.symbol, {})
+            avg_entry = Decimal(str(hdata.get("avg_entry_price", 0))) if isinstance(hdata, dict) else Decimal("0")
+            if avg_entry > 0:
+                realised = (price - avg_entry) * qty
+                total += realised
+        return total

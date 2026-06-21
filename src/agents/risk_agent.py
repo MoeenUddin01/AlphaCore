@@ -34,23 +34,29 @@ class RiskAgent:
         total_value = float(portfolio.get("total_value", settings.PORTFOLIO_INITIAL_CAPITAL))
         peak_value = float(portfolio.get("peak_value", total_value))
 
+        # holdings is populated by get_current_portfolio_state() in jobs.py
+        # and keyed by full pair symbol (e.g. "ADA/USDT").
         holdings_raw: Any = portfolio.get("holdings", {})
-        if isinstance(holdings_raw, dict):
-            holdings: dict[str, float] = {
-                k: float(v) if not isinstance(v, dict) else float(v.get("value", 0))
-                for k, v in holdings_raw.items()
-            }
-        elif isinstance(holdings_raw, list):
-            holdings = {
-                item.get("symbol", ""): float(item.get("value", 0))
-                for item in holdings_raw if isinstance(item, dict)
-            }
-        else:
-            holdings = {}
-
+        holdings: dict[str, float] = {}
         existing_symbols: set[str] = set()
+
+        if isinstance(holdings_raw, dict):
+            for sym, hdata in holdings_raw.items():
+                if isinstance(hdata, dict):
+                    holdings[sym] = float(hdata.get("value", 0))
+                else:
+                    holdings[sym] = float(hdata)
+                existing_symbols.add(sym)
+
+        # Same-cycle trades — prevent BUY+SELL same symbol within one cycle
         for et in state.get("executed_trades", []):
             existing_symbols.add(et.proposal.symbol)
+
+        _logger.info(
+            "RiskAgent sees %d existing holdings: %s",
+            len(holdings),
+            {s: f"${v:.2f}" for s, v in holdings.items()},
+        )
 
         approved: list[ProposedTrade] = []
         auto_exits_approved: int = 0
@@ -100,7 +106,7 @@ class RiskAgent:
                 _logger.warning("Rejected %s (position size limit)", trade.symbol)
                 continue
 
-            current_coin_value = holdings.get(trade.symbol.split("/")[0], 0.0)
+            current_coin_value = holdings.get(trade.symbol, 0.0)
             new_coin_value = current_coin_value + trade_value
             coin_pct = new_coin_value / total_value * 100
             if coin_pct > 20.0:
@@ -139,10 +145,11 @@ class RiskAgent:
                 _logger.warning("Rejected %s (duplicate position)", trade.symbol)
                 continue
 
-            same_direction_count = sum(
-                1 for et in state.get("executed_trades", [])
-                if et.proposal.side == trade.side
-            ) + sum(
+            # Holdings from state are all long positions.
+            # For a BUY proposal, every existing holding is a same-direction position.
+            # For a SELL proposal, existing holdings are opposite direction.
+            existing_same_direction = len(holdings) if trade.side == "BUY" else 0
+            same_direction_count = existing_same_direction + sum(
                 1 for t in approved if t.side == trade.side
             )
             if same_direction_count > 3:

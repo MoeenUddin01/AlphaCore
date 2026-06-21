@@ -41,6 +41,7 @@ class BinanceClient:
             api_secret=settings.BINANCE_API_SECRET,
             testnet=settings.BINANCE_TESTNET,
         )
+        self._filters_cache: dict[str, dict] = {}
 
     @retry_with_backoff
     def get_ohlcv(self, pair: str, interval: str, limit: int = 500) -> pd.DataFrame:
@@ -149,6 +150,108 @@ class BinanceClient:
                 raise RuntimeError(f"Malformed kline data for {symbol}: {exc}") from exc
 
         return pd.DataFrame(rows)
+
+    @retry_with_backoff
+    def get_historical_ohlcv_mainnet(self, pair: str, interval: str, limit: int = 1000) -> pd.DataFrame:
+        """Fetch OHLCV from Binance **Mainnet** public read-only endpoint.
+
+        Creates a temporary unauthenticated ``Client`` (no API key, no
+        secret) that hits the production Binance API.  This is safe for
+        read-only market data and is **never** used for trading or
+        account operations — the existing ``self._client`` (testnet)
+        handles all live trading.
+
+        Binance Mainnet has years of historical depth vs. ~17 days on
+        Testnet, making this method suitable for model training datasets.
+        When ``limit > 1000`` the method paginates automatically.
+
+        Args:
+            pair: Trading pair in ``BTC/USDT`` format.
+            interval: Kline interval (e.g. ``1h``, ``1d``).
+            limit: Number of candles to fetch (paginated if >1000).
+
+        Returns:
+            DataFrame with columns ``timestamp``, ``open``, ``high``,
+            ``low``, ``close``, ``volume`` (all Decimal), sorted
+            oldest-first with duplicates removed.
+
+        Raises:
+            RuntimeError: If the API call or data parsing fails.
+        """
+        symbol = format_pair_for_binance(pair)
+        _logger.info("[MAINNET-READONLY] Fetching %d %s klines for %s", limit, interval, symbol)
+
+        mainnet_client = Client()  # no api_key/secret → mainnet public endpoint
+
+        try:
+            if limit <= 1000:
+                klines = mainnet_client.get_klines(symbol=symbol, interval=interval, limit=limit)
+            else:
+                chunk_size = 1000
+                interval_ms = _INTERVAL_MS.get(interval, 3_600_000)
+                now_ms = int(time.time() * 1000)
+                start_ms = now_ms - limit * interval_ms
+                all_rows: list[dict] = []
+                seen_timestamps: set[int] = set()
+
+                _logger.info(
+                    "[MAINNET-READONLY] Paginating %s %s data from %d chunks",
+                    symbol, interval, (limit + chunk_size - 1) // chunk_size,
+                )
+
+                while start_ms < now_ms and len(all_rows) < limit:
+                    end_ms = min(start_ms + chunk_size * interval_ms, now_ms)
+                    chunk = mainnet_client.get_klines(
+                        symbol=symbol, interval=interval, limit=chunk_size,
+                        startTime=int(start_ms), endTime=int(end_ms),
+                    )
+                    if not chunk:
+                        start_ms = end_ms
+                        continue
+                    for k in chunk:
+                        ts = int(k[0])
+                        if ts in seen_timestamps:
+                            continue
+                        seen_timestamps.add(ts)
+                        all_rows.append({
+                            "timestamp": timestamp_to_datetime(ts),
+                            "open": Decimal(k[1]),
+                            "high": Decimal(k[2]),
+                            "low": Decimal(k[3]),
+                            "close": Decimal(k[4]),
+                            "volume": Decimal(k[5]),
+                        })
+                    start_ms = end_ms
+
+                if not all_rows:
+                    raise RuntimeError(f"Empty klines response from mainnet for {symbol}")
+
+                klines = all_rows
+        except BinanceAPIException as exc:
+            raise RuntimeError(f"Binance mainnet API error for {symbol}: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Unexpected mainnet error for {symbol}: {exc}") from exc
+
+        if isinstance(klines, list) and klines and isinstance(klines[0], dict):
+            df = pd.DataFrame(klines)
+        else:
+            rows = []
+            for k in klines:
+                rows.append({
+                    "timestamp": timestamp_to_datetime(int(k[0])),
+                    "open": Decimal(k[1]),
+                    "high": Decimal(k[2]),
+                    "low": Decimal(k[3]),
+                    "close": Decimal(k[4]),
+                    "volume": Decimal(k[5]),
+                })
+            if not rows:
+                raise RuntimeError(f"Empty klines response from mainnet for {symbol}")
+            df = pd.DataFrame(rows)
+
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        _logger.info("[MAINNET-READONLY] Returning %d %s klines for %s", len(df), interval, symbol)
+        return df
 
     @retry_with_backoff
     def get_current_price(self, pair: str) -> Decimal:
@@ -267,3 +370,52 @@ class BinanceClient:
         except Exception as exc:
             _logger.warning("%s — %s", _FUTURES_ERROR_MSG, exc)
             return {"open_interest": Decimal("0"), "open_interest_value": Decimal("0")}
+
+    def get_symbol_filters(self, pair: str) -> dict:
+        """Return LOT_SIZE and MIN_NOTIONAL filters for *pair*, cached per session.
+
+        Args:
+            pair: Trading pair in ``BTC/USDT`` format.
+
+        Returns:
+            Dict with keys:
+                ``lot_size`` — dict with ``minQty``, ``maxQty``, ``stepSize`` (all Decimal)
+                ``min_notional`` — dict with ``minNotional`` (Decimal)
+            Returns empty ``{"lot_size": {}, "min_notional": {}}`` on failure.
+        """
+        sym = format_pair_for_binance(pair)
+        if sym in self._filters_cache:
+            return self._filters_cache[sym]
+
+        _logger.info("Fetching symbol filters for %s", sym)
+        try:
+            info = self._client.get_symbol_info(sym)
+        except Exception as exc:
+            _logger.warning("Failed to fetch symbol info for %s: %s", sym, exc)
+            result: dict = {"lot_size": {}, "min_notional": {}}
+            self._filters_cache[sym] = result
+            return result
+
+        result = {"lot_size": {}, "min_notional": {}}
+        for f in info.get("filters", []):
+            if f["filterType"] == "LOT_SIZE":
+                result["lot_size"] = {
+                    "minQty": Decimal(f["minQty"]),
+                    "maxQty": Decimal(f["maxQty"]),
+                    "stepSize": Decimal(f["stepSize"]),
+                }
+            elif f["filterType"] == "MIN_NOTIONAL":
+                result["min_notional"] = {
+                    "minNotional": Decimal(f["minNotional"]),
+                }
+
+        self._filters_cache[sym] = result
+        _logger.info(
+            "Filters for %s: LOT_SIZE step=%s min=%s max=%s  MIN_NOTIONAL=%s",
+            sym,
+            result["lot_size"].get("stepSize"),
+            result["lot_size"].get("minQty"),
+            result["lot_size"].get("maxQty"),
+            result["min_notional"].get("minNotional"),
+        )
+        return result
