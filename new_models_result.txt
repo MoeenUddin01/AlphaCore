@@ -1,0 +1,36 @@
+==============================================================================================================
+  AlphaCore — Final Training Results (Binance Mainnet Read-Only)
+==============================================================================================================
+Symbol     Model                  Rows       Epochs     Val Loss     Test Loss    Test Acc   Saved 
+--------------------------------------------------------------------------------------------------------------
+ADA/USDT   LSTM (direction)       2,951      1              0.724405     0.863237 47.4%      yes   
+ADA/USDT   Classifier (vol)       2,951      9              0.448963     0.507123 83.1%      yes   
+BNB/USDT   LSTM (direction)       2,951      7              0.693975     0.690467 51.1%      yes   
+BNB/USDT   Classifier (vol)       2,951      20             0.423077     0.457844 83.8%      yes   
+BTC/USDT   LSTM (direction)       2,951      2              0.694637     0.693429 49.3%      yes   
+BTC/USDT   Classifier (vol)       2,951      8              0.448652     0.452830 83.8%      yes   
+ETH/USDT   LSTM (direction)       2,951      12             0.692373     0.693763 49.3%      yes   
+ETH/USDT   Classifier (vol)       2,951      15             0.448544     0.658453 76.5%      yes   
+SOL/USDT   LSTM (direction)       2,951      2              0.700150     0.696787 52.6%      yes   
+SOL/USDT   Classifier (vol)       2,951      16             0.438042     0.354314 89.0%      yes   
+--------------------------------------------------------------------------------------------------------------
+
+Key Findings:
+  • LSTM direction models (5/5) — all at ~0.692-0.693 val_loss (random guess).
+    No learnable signal in OHLCV-only features for price direction.
+  • Volatility classifiers (5/5) — all learned: 76-89% test accuracy.
+    SOL/USDT classifier achieved highest test accuracy at 89.0%.
+  • Data source: Binance Mainnet read-only (3000 1h candles per pair).
+
+All 10/10 Checkpoints created:
+------------------------------------------------------------
+  ADAUSDT_classifier_best.pt                    2414 KB  epoch= 9  val_loss=0.409307  Jun 20 22:29
+  ADAUSDT_lstm_best.pt                          2415 KB  epoch= 1  val_loss=0.692013  Jun 20 22:29
+  BNBUSDT_classifier_best.pt                    2414 KB  epoch=20  val_loss=0.404694  Jun 20 22:28
+  BNBUSDT_lstm_best.pt                          2415 KB  epoch= 7  val_loss=0.691914  Jun 20 22:28
+  BTCUSDT_classifier_best.pt                    2414 KB  epoch= 8  val_loss=0.419180  Jun 20 22:25
+  BTCUSDT_lstm_best.pt                          2415 KB  epoch= 2  val_loss=0.692479  Jun 20 22:25
+  ETHUSDT_classifier_best.pt                    2414 KB  epoch=15  val_loss=0.430040  Jun 20 22:26
+  ETHUSDT_lstm_best.pt                          2415 KB  epoch=12  val_loss=0.692098  Jun 20 22:26
+  SOLUSDT_classifier_best.pt                    2414 KB  epoch=16  val_loss=0.421574  Jun 20 22:27
+  SOLUSDT_lstm_best.pt                          2415 KB  epoch= 2  val_loss=0.691871  Jun 20 22:27
