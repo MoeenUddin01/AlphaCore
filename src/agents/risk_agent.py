@@ -11,6 +11,7 @@ from typing import Any
 
 from src.agents.agent_state import AgentState, ProposedTrade
 from src.utils.config import settings
+from src.utils.helpers import send_alert
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -66,6 +67,13 @@ class RiskAgent:
 
         drawdown_pct = ((peak_value - total_value) / peak_value * 100) if peak_value > 0 else 0.0
         circuit_breaker = drawdown_pct > 15.0
+
+        if drawdown_pct > 10.0:
+            send_alert(
+                f"Drawdown {drawdown_pct:.2f}% — {'CIRCUIT BREAKER ACTIVE' if circuit_breaker else 'exceeds 10% threshold'} "
+                f"(peak={peak_value:.2f}, current={total_value:.2f})",
+                level="error" if circuit_breaker else "warning",
+            )
 
         if circuit_breaker:
             _logger.warning(

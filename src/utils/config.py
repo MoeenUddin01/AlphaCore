@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     PORTFOLIO_INITIAL_CAPITAL: Decimal = Decimal("10000")
     MAX_POSITION_SIZE_PCT: float = 0.05
+    MAX_POSITION_SIZE_USD: Decimal = Decimal("500")
     STOP_LOSS_PCT: float = 0.03
     TRADING_FEE_PCT: float = 0.001
     TRADING_PAUSED: bool = False
@@ -63,6 +64,8 @@ class Settings(BaseSettings):
 
     MODEL_CHECKPOINT_DIR: str = "./models_saved"
     DATA_CACHE_DIR: str = "./data_cache"
+
+    ALERT_WEBHOOK_URL: str = ""
 
 
 settings = Settings()

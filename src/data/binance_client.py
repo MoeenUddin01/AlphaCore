@@ -36,6 +36,14 @@ class BinanceClient:
 
     def __init__(self) -> None:
         _logger.info("Initialising BinanceClient (testnet=%s)", settings.BINANCE_TESTNET)
+        if not settings.BINANCE_TESTNET:
+            import os
+            if os.environ.get("I_UNDERSTAND_THIS_IS_REAL_MONEY", "").lower() != "true":
+                raise RuntimeError(
+                    "BINANCE_TESTNET is False — this connects to REAL Binance Mainnet. "
+                    "Set I_UNDERSTAND_THIS_IS_REAL_MONEY=true in your .env file to confirm "
+                    "you understand this will trade with real capital."
+                )
         self._client = Client(
             api_key=settings.BINANCE_API_KEY,
             api_secret=settings.BINANCE_API_SECRET,

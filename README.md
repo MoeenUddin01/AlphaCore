@@ -9,27 +9,29 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 ## Features
 
-- **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (CryptoPanic), Fear & Greed Index, **funding rate**, **open interest**
+- **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (CoinDesk RSS), Fear & Greed Index
 - **Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMAs, returns, volatility via `pandas-ta`
 - **Two ML Models Per Symbol** — `LSTMModel` for price direction (2-class, ~50% acc) and `LSTMClassifier` for volatility regime (sigmoid, ~83% acc)
 - **Volatility Regime Prediction** — binary target from 4-candle price range vs 24-candle median; BCE loss, saves `_classifier_best.pt` checkpoints
-- **Confidence Scoring** — combined score: `direction_conf × 0.4 + vol_prob × 0.3 + |sentiment| × 0.3`
 - **Sentiment Analysis** — FinBERT (ProsusAI/finbert) with **time-decay weighting** — fresher headlines contribute more via linear decay over 24h (10% floor); `avg_headline_age_hours` logged per headline batch
-- **Multi-Agent Pipeline** — LangGraph StateGraph: Manager → Risk → Execution → Portfolio Monitor
-- **Manager Agent (Option A)** — sentiment-primary trading; side determined solely by `abs(sentiment_score)` thresholds (`>0.30 BUY`, `<-0.30 SELL`); LSTM direction logged for research only; position halved in high-volatility regime; **paused mode** check skips new entry proposals when `data_cache/.trading_paused` flag exists
-- **Risk Management** — position sizing, concentration limits (≤20% per coin), total exposure caps (≤80%), drawdown circuit breaker (>15%), duplicate prevention, **correlation risk** (≥3 same-direction positions halves quantity, ≥4 rejects)
-- **Auto-Exit Monitoring** — `PortfolioMonitor.check_exit_conditions()` checks every open position against SL/TP from DB each cycle; generates `ProposedTrade` with `is_auto_exit=True` that bypasses all risk checks
+- **Multi-Agent Pipeline** — 5-node LangGraph StateGraph: monitor_exits → Manager → Risk → Execution → monitor_update
+- **Manager Agent (Option A)** — sentiment-primary trading; side determined solely by `abs(sentiment_score)` thresholds (`>0.30 BUY`, `<-0.30 SELL`); position halved in high-volatility regime; **paused mode** check skips new entry proposals when flag file exists (auto-exits still processed)
+- **Dual Position Caps** — percentage-based (5% of portfolio) AND absolute dollar cap ($500 USD) — `min()` protects against portfolio-value bugs
+- **Risk Management** — position sizing, concentration limits (≤20% per coin), total exposure caps (≤80%), drawdown circuit breaker (>15%), duplicate prevention, **correlation risk**, **SELL-without-holding guard** (spot-only safety)
+- **Auto-Exit Monitoring** — `PortfolioMonitor.check_exit_conditions()` checks every open position against SL/TP each cycle; generates `ProposedTrade` with `is_auto_exit=True` that bypasses all risk checks
+- **Alert Webhook** — Discord/Telegram alerts on: drawdown >10%, ≥2 failed trades in a cycle, scheduler job exceptions, scheduler crashes
 - **Real Trading Fees** — `TRADING_FEE_PCT=0.001` (0.1%) deducted from realised P&L on both entry and exit legs; `fee_paid` persisted on `ExecutedTrade` and `Trade` DB table
 - **Idempotency Lock** — file-based `FileLock` on `data_cache/.trading_cycle.lock` (5s timeout) prevents double execution when scheduler fires overlapping cycles
-- **Kill Switch** — `POST /portfolio/pause-trading` writes a flag file; `POST /portfolio/resume-trading` deletes it; Streamlit sidebar buttons; Manager Agent reads flag each cycle and skips new entry trades while allowing SL/TP exits
+- **Kill Switch** — `POST /portfolio/pause-trading` writes a flag file; `POST /portfolio/resume-trading` deletes it; Manager Agent reads flag each cycle and skips new entry trades while allowing SL/TP exits
+- **Mainnet Safety Guard** — two-env-var confirmation required for real-money trading: `BINANCE_TESTNET=false` AND `I_UNDERSTAND_THIS_IS_REAL_MONEY=true` must both be set, or a `RuntimeError` is raised
 - **Paper Trading** — Binance Testnet integration with slippage modelling
-- **REST API** — FastAPI with 15+ endpoints for portfolio, trades, signals, health, **sentiment validation**, **pause/resume**
-- **Streamlit Dashboard** — overview, ML signals, trade history, risk metrics, **sentiment validation** pages with Plotly charts
-- **Persistent Storage** — SQLite via SQLAlchemy ORM (5 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid` columns on `Trade`
-- **Sentiment Validation Dashboard** — win-rate color-coded metric, sample-size progress bar, win/loss sentiment comparison chart, statistical readiness gate (requires ≥30 trades)
-- **Automated Scheduling** — 4-mode CLI entry point: `trade` (full stack), `api` (server only), `train` (LSTM training), `dashboard` (Streamlit)
+- **REST API** — FastAPI with 15+ endpoints for portfolio, trades, signals, health, sentiment validation, pause/resume
+- **Next.js Frontend** — dark-terminal themed dashboard with 5 pages: overview, signals, trades, risk, validation; live data via React Query polling; animated charts (Recharts, Framer Motion)
+- **Persistent Storage** — SQLite via SQLAlchemy ORM (6 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid` columns on `Trade`
+- **Sentiment Validation** — win-rate color-coded metric, sample-size progress bar, win/loss sentiment comparison chart, statistical readiness gate (requires ≥30 trades)
+- **Automated Scheduling** — 4-mode CLI entry point: `trade` (full stack), `api` (server only), `train` (LSTM training), `dashboard` (Streamlit); frontend started separately via `npm run dev`
 - **Scheduler** — APScheduler with 3 recurring jobs (trading cycle, cache refresh, health check) + one-shot model training on startup
-- **Training Data** — 2 years of 1h OHLCV via Yahoo Finance (free, no API key); Binance Futures for funding rate / open interest
+- **Training Data** — 2 years of 1h OHLCV via Binance Mainnet (read-only, no API key needed)
 - **Dockerized** — Docker Compose for one-command startup
 
 ---
@@ -37,20 +39,20 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 ## Tech Stack
 
 | Layer | Technology |
-|---|---|
-| Language | Python 3.12 |
+|---|---|---|
+| Language | Python 3.12 + TypeScript |
 | Deep learning | PyTorch 2.x (CUDA 12.6) |
 | NLP model | FinBERT (ProsusAI/finbert via HuggingFace) |
 | Price model | LSTM (direction) + LSTMClassifier (volatility regime) |
 | Agent framework | LangGraph 0.2+ |
-| Crypto data | python-binance (Testnet), CoinGecko API |
-| News/sentiment | CryptoPanic API (free tier) |
+| Crypto data | python-binance (Testnet + Mainnet read-only), CoinGecko API |
+| News/sentiment | CoinDesk RSS (free, no API key) |
 | Feature engineering | pandas, numpy, pandas-ta |
 | Database | SQLAlchemy ORM, SQLite (dev) |
 | API server | FastAPI + Uvicorn |
-| Dashboard | Streamlit + Plotly |
+| Dashboard | Next.js 16, TypeScript, Tailwind v4, shadcn/ui, Recharts, Framer Motion |
 | Task scheduler | APScheduler |
-| Package manager | uv |
+| Package manager | uv (Python) / npm (frontend) |
 | Deployment | Docker + Docker Compose |
 | Logging | Python logging + rotating file handler |
 
@@ -62,8 +64,8 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- Node.js 20+ (for frontend)
 - Binance Testnet account ([sign up here](https://testnet.binance.vision/))
-- CryptoPanic API key ([free tier](https://cryptopanic.com/developers/api/))
 
 ### Installation
 
@@ -89,16 +91,17 @@ Edit `.env` with your API keys and preferences:
 BINANCE_API_KEY=your_testnet_api_key
 BINANCE_API_SECRET=your_testnet_api_secret
 BINANCE_TESTNET=true
-CRYPTOPANIC_API_KEY=your_cryptopanic_key
 COINGECKO_API_KEY=
 DATABASE_URL=sqlite:///./alphacore.db
 LOG_LEVEL=INFO
 PORTFOLIO_INITIAL_CAPITAL=10000
 MAX_POSITION_SIZE_PCT=0.05
+MAX_POSITION_SIZE_USD=500
 STOP_LOSS_PCT=0.03
 TRADING_FEE_PCT=0.001
 TRADING_PAUSED=False
 TRADING_PAIRS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,ADA/USDT
+ALERT_WEBHOOK_URL=
 ```
 
 ---
@@ -129,21 +132,17 @@ The default mode is `trade` — just `python main.py` starts the full system.
 
 When running in `trade` or `api` mode, visit **http://localhost:8000/docs** for Swagger UI.
 
-### Run a single trading cycle (one-off)
+### Frontend Dashboard
+
+Start the Next.js frontend (requires Node.js 20+):
 
 ```bash
-python -c "
-from src.data.data_pipeline import DataPipeline
-from src.agents import run_cycle
-from src.database.crud import save_cycle
-
-pipeline = DataPipeline()
-data = pipeline.run()
-state = run_cycle(data, {'cash': 10000, 'total_value': 10000})
-save_cycle(state)
-print('Cycle complete:', state['cycle_id'])
-"
+cd frontend
+npm install
+npm run dev
 ```
+
+Open **http://localhost:3000** for the dark-terminal dashboard.
 
 ### Run all tests
 
@@ -181,15 +180,15 @@ docker-compose up --build
 
 ---
 
-## Dashboard Pages
+## Frontend Pages (Next.js)
 
-| Page | Description |
+| Page | Route | Description |
 |---|---|---|
-| **Overview** | Portfolio value chart, asset allocation donut, agent status bar, Fear & Greed gauge, signal confidence chart |
-| **ML Signals** | Bullish/bearish/neutral counts, signal table with direction emojis, sentiment gauges per symbol, confidence over time |
-| **Trade History** | Stats cards, filterable trade table with coloured side column, P&L bar chart, best/worst trade |
-| **Risk Dashboard** | Drawdown, peak value, win rate, avg P&L; drawdown chart, cycle performance table, risk alert thresholds |
-| **Validation** | Sentiment-driven trade win rate with colour-coded metric, sample size progress bar, win/loss sentiment bar chart, statistical readiness gate (≥30 trades) |
+| **Overview** | `/` | KPI row (cash, positions, total value, active trades), pipeline stage strip, portfolio area chart, allocation donut, Fear & Greed gauge + countdown timer |
+| **Signals** | `/signals` | Bullish/bearish/neutral KPI cards, signals table with sentiment bars and volatility badges, market sentiment indicator |
+| **Trades** | `/trades` | Symbol + status filterable table, KPI row (total trades, win rate, P&L), KPI badges per status badge |
+| **Risk** | `/risk` | VaR progress, concentration, exposure, drawdown cards with tiered colors; drawdown area chart, risk alerts |
+| **Validation** | `/validation` | Win rate metric with color threshold bar, avg win/loss, sample progress bar, sentiment conviction bar chart |
 
 ---
 
@@ -198,28 +197,29 @@ docker-compose up --build
 The system runs a closed-loop trading cycle every hour:
 
 ```
-DataPipeline         → fetch candles + news + market data + funding rate + open interest
-FeatureEngineer      → compute indicators + volatility regime target (target_vol_regime)
+DataPipeline         → fetch candles + news + market data
+FeatureEngineer      → compute indicators + volatility regime target
 Predictor            → LSTM direction (2-class) + LSTMClassifier vol regime (sigmoid) + FinBERT sentiment (time-decay weighted)
-Manager Agent        → sentiment-primary (Option A): rank by |sentiment|, side from sentiment thresholds, skip if paused flag exists
-Risk Agent           → screen each proposed trade (6 checks + auto-exit bypass)
-Execution Agent      → fire approved orders to Binance Testnet, calculate + record fee_paid
-Portfolio Monitor    → check SL/TP auto-exit conditions, update P&L (fee-aware), check rebalance, log cycle
-CRUD / Database      → persist everything to SQLite including fee_paid, is_sentiment_driven, signal_confidence
+Monitor (check exits)→ detect SL/TP breaches on open positions, propose auto-exit trades
+Manager Agent        → sentiment-primary: rank by |sentiment|, side from sentiment thresholds, apply USD + % position caps, skip if paused
+Risk Agent           → screen each proposed trade (7 checks: size, concentration, exposure, drawdown, duplicate, correlation, SELL-without-holding; auto-exit bypasses all)
+Execution Agent      → validate LOT_SIZE + MIN_NOTIONAL, round qty down to step size, fire orders to Binance Testnet, record fee_paid
+Monitor (update)     → update P&L, persist positions to DB, compute portfolio state
+CRUD / Database      → persist everything to SQLite
 ```
 
 ### Agent Roles
 
-- **Manager Agent (Option A)** — sentiment-primary trading: ranks signals by `|sentiment_score|`, side determined by thresholds (`>0.30 → BUY`, `<-0.30 → SELL`), halves position in high-volatility regime, appends `vol_tag` to reasoning; checks `data_cache/.trading_paused` flag at start of `run()` — skips all new entry proposals when paused, allowing only auto-exit trades through; LSTM direction model outputs logged for research only
-- **Risk Agent** — 6 independent checks: position size limit (≤5% of portfolio), concentration (≤20% per coin), total exposure (≤80%), drawdown circuit breaker (>15% halts all trading), duplicate position prevention, **correlation risk** (>2 same-direction open positions halves quantity, >3 rejects entirely); trades with `is_auto_exit=True` bypass all 6 checks
-- **Execution Agent** — takes approved orders from state, fetches live price, models random slippage (0–0.15%), calculates `fee_paid = executed_quantity × executed_price × TRADING_FEE_PCT`, routes market orders to Binance Testnet, records all fill details including order ID
-- **Portfolio Monitor** — calls `check_exit_conditions(state)` each cycle: iterates open positions, queries DB for SL/TP prices, generates `ProposedTrade` with `is_auto_exit=True` when triggered; tracks **fee-aware realised P&L**: `(exit_price - entry_price) × qty - proportional_entry_fee - exit_fee`; accumulates `total_entry_fees` per position on BUY, deducts proportionally on SELL; computes total portfolio value + drawdown from peak; triggers rebalance alerts when any position drifts >10% from equal-weight target
+- **Manager Agent** — sentiment-primary trading; ranks signals by `|sentiment_score|`, side from thresholds (`>0.30 BUY`, `<-0.30 SELL`); applies dual position caps: `min(portfolio_pct_qty, usd_cap_qty)`; preserves auto-exit trades from monitor_exits; checks pause flag at start of `run()` — skips new entries when paused, allows auto-exits through
+- **Risk Agent** — 7 independent checks: position size (≤5%), concentration (≤20% per coin), exposure (≤80%), drawdown (>15% halts), duplicate prevention, correlation risk (≥3 same-direction halves, ≥4 rejects), **SELL-without-holding guard** (rejects sell when no position held); trades with `is_auto_exit=True` bypass all checks
+- **Execution Agent** — fetches live price, fetches symbol filters (LOT_SIZE stepSize, MIN_NOTIONAL), rounds quantity **down** to step size (never up, never exceeds), validates notional ≥ MIN_NOTIONAL, returns `REJECTED_LOT_SIZE` status for invalid orders; models random slippage (0–0.15%), calculates `fee_paid = qty × price × TRADING_FEE_PCT`, routes market orders to Binance Testnet
+- **Portfolio Monitor** — two-stage: `check_exit_conditions()` (first) iterates open positions, queries SL/TP from DB, proposes auto-exits; `run()` (last) updates **fee-aware realised P&L** per filled trade, persists positions to DB (`query-then-update-or-insert`), computes total portfolio value and drawdown from peak
 
 ---
 
 ## Database Schema
 
-Five SQLAlchemy ORM tables:
+Six SQLAlchemy ORM tables:
 
 | Table | Key Columns |
 |---|---|---|
@@ -228,6 +228,7 @@ Five SQLAlchemy ORM tables:
 | `trades` | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed quantity + price, stop-loss, take-profit, status, PnL, `is_sentiment_driven` (Boolean), `signal_confidence` (Numeric), `fee_paid` (Numeric) |
 | `positions` | `symbol` (unique), quantity, avg entry price, current price, unrealised PnL |
 | `portfolio_snapshots` | FK → `cycle_runs.cycle_id`, total value, cash, positions value, P&L, peak value, drawdown |
+| `portfolio_state` | Singleton row, holdings JSON, last updated timestamp |
 
 ---
 
@@ -243,11 +244,16 @@ AlphaCore/
 ├── main.py                    # Single entry point (4 modes)
 ├── docker-compose.yml
 ├── Dockerfile
+├── frontend/                  # Next.js 16 dashboard
+│   ├── app/                   # App router pages + layout
+│   ├── components/            # shadcn/ui + custom components
+│   ├── hooks/                 # React Query hooks
+│   └── lib/                   # API client + types + utils
 ├── src/
 │   ├── data/                  # Data fetching & feature engineering
 │   │   ├── binance_client.py
 │   │   ├── coingecko_client.py
-│   │   ├── cryptopanic_client.py
+│   │   ├── rss_news_client.py # CoinDesk RSS (free, no API key)
 │   │   ├── feature_engineer.py
 │   │   └── data_pipeline.py
 │   ├── models/                # ML models
@@ -283,8 +289,8 @@ AlphaCore/
 │   │       ├── overview.py
 │   │       ├── signals.py
 │   │       ├── trades.py
-│   │       └── risk.py
-│   │       ├── validation.py
+│   │       ├── risk.py
+│   │       └── validation.py
 │   ├── scheduler/             # APScheduler job definitions
 │   │   ├── __init__.py
 │   │   ├── job_runner.py      # SchedulerRunner class (lifecycle, signal handling)
@@ -313,17 +319,19 @@ AlphaCore/
 ## Development Phases
 
 | Phase | Description | Status |
-|---|---|---|
+|---|---|---|---|
 | Phase 1 | Project scaffold (config, logging, dependencies) | ✅ Complete |
-| Phase 2 | Data pipeline (Binance, CoinGecko, CryptoPanic, features) | ✅ Complete |
+| Phase 2 | Data pipeline (Binance, CoinGecko, RSS, features) | ✅ Complete |
 | Phase 3 | ML models (LSTM, TFT, FinBERT, training loop) | ✅ Complete |
 | Phase 4 | Agent system (LangGraph agents, state management) | ✅ Complete |
 | Phase 5 | Database (SQLAlchemy models, CRUD, connection) | ✅ Complete |
 | Phase 6 | API server (FastAPI routes, Pydantic schemas) | ✅ Complete |
 | Phase 7 | Dashboard (Streamlit pages, Plotly charts) | ✅ Complete |
-| Phase 8 | Scheduler + dual-model training (direction + vol regime, Yahoo Finance data, manager filters) | ✅ Complete |
+| Phase 8 | Scheduler + dual-model training (direction + vol regime, manager filters) | ✅ Complete |
 | Phase 9 | Docker deployment (Dockerfile, Compose) | ⏳ Pending |
 | Phase 10 | Testing (pytest suite for all modules) | ⏳ Pending |
+| Phase 11 | Next.js frontend (TypeScript, shadcn/ui, Recharts, React Query) | ✅ Complete |
+| Phase 12 | Mainnet safety guard, USD cap, alert webhook, LOT_SIZE validation | ✅ Complete |
 
 ---
 

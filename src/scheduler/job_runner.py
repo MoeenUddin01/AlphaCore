@@ -7,8 +7,10 @@ SIGINT / SIGTERM.
 
 import signal
 import sys
+import traceback
 from typing import Any
 
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -19,6 +21,7 @@ from src.scheduler.jobs import (
     run_model_training,
     run_trading_cycle,
 )
+from src.utils.helpers import send_alert
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -96,11 +99,30 @@ class SchedulerRunner:
                 next_str = "pending"
             self._logger.info("  %-20s next run: %s", job.id, next_str)
 
+        def _on_job_event(event: Any) -> None:
+            if event.exception:
+                send_alert(
+                    f"Job {event.job_id} failed: {event.exception}\n"
+                    f"{''.join(traceback.format_tb(event.traceback))}",
+                    level="error",
+                )
+
+        self.scheduler.add_listener(
+            _on_job_event,
+            EVENT_JOB_ERROR | EVENT_JOB_EXECUTED,
+        )
+
         self._logger.info("Starting scheduler (Ctrl+C to stop)")
         try:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):
             self.stop()
+        except Exception as exc:
+            send_alert(
+                f"Scheduler crashed: {exc}\n{traceback.format_exc()}",
+                level="error",
+            )
+            raise
 
     def stop(self) -> None:
         """Gracefully shut down the scheduler."""

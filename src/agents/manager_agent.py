@@ -201,7 +201,15 @@ class ManagerAgent:
             return None
 
         max_position = Decimal(str(settings.MAX_POSITION_SIZE_PCT))
-        base_quantity = (max_position * Decimal(str(portfolio_value)) / entry_price).quantize(Decimal("0.00001"))
+        pct_quantity = (max_position * Decimal(str(portfolio_value)) / entry_price).quantize(Decimal("0.00001"))
+
+        max_usd_qty = (settings.MAX_POSITION_SIZE_USD / entry_price).quantize(Decimal("0.00001"))
+        base_quantity = min(pct_quantity, max_usd_qty)
+
+        _logger.info(
+            "%s base quantity: pct=%s, usd_cap=%s, final=%s",
+            sig.symbol, pct_quantity, max_usd_qty, base_quantity,
+        )
 
         vol_regime = getattr(sig, "vol_regime", 0)
         if vol_regime == 1:

@@ -1,7 +1,7 @@
 """Shared utility functions for the Autonomous Crypto Quant system.
 
 Provides retry logic, decimal conversion, timestamp handling, pair
-formatting, and list chunking used across all modules.
+formatting, list chunking, and alert webhook posting used across all modules.
 """
 
 import time
@@ -10,6 +10,9 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Any, Callable, TypeVar
 
+import requests
+
+from src.utils.config import settings
 from src.utils.logger import get_logger
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -127,3 +130,28 @@ def chunk_list(lst: list, size: int) -> list[list]:
     if size < 1:
         raise ValueError(f"Chunk size must be >= 1, got {size}")
     return [lst[i : i + size] for i in range(0, len(lst), size)]
+
+
+def send_alert(message: str, level: str = "info") -> None:
+    """Post *message* to the configured alert webhook (Discord / Telegram).
+
+    Fires and forgets — failures are logged but never re-raised so an
+    alert webhook outage never interrupts the trading pipeline.
+
+    Args:
+        message: Human-readable alert text.
+        level: One of ``"info"``, ``"warning"``, ``"error"``.
+    """
+    webhook_url = settings.ALERT_WEBHOOK_URL
+    if not webhook_url:
+        return
+
+    emoji = {"info": "", "warning": "⚠️ ", "error": "🚨 "}.get(level, "")
+    payload = {"content": f"{emoji}**AlphaCore [{level.upper()}]**\n{message}"}
+
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        resp.raise_for_status()
+        _logger.info("Alert sent (level=%s): %s", level, message[:80])
+    except requests.RequestException as exc:
+        _logger.warning("Failed to send alert (level=%s): %s", level, exc)

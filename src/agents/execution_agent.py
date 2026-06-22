@@ -13,7 +13,7 @@ from binance.exceptions import BinanceAPIException
 from src.agents.agent_state import AgentState, ExecutedTrade, ProposedTrade
 from src.data.binance_client import BinanceClient
 from src.utils.config import settings
-from src.utils.helpers import format_pair_for_binance, retry_with_backoff
+from src.utils.helpers import format_pair_for_binance, retry_with_backoff, send_alert
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -64,6 +64,11 @@ class ExecutionAgent:
         filled = sum(1 for et in state["executed_trades"] if et.status == "FILLED")
         failed = sum(1 for et in state["executed_trades"] if et.status == "FAILED")
         rejected = sum(1 for et in state["executed_trades"] if et.status == "REJECTED_LOT_SIZE")
+        if failed >= 2:
+            send_alert(
+                f"{failed}/{len(approved)} trades FAILED in cycle {state['cycle_id']}",
+                level="error",
+            )
         state["cycle_log"].append(
             f"[{datetime.utcnow().isoformat()}] ExecutionAgent: "
             f"executed {filled}/{len(approved)} trades "
