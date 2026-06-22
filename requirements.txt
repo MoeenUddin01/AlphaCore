@@ -1,7 +1,8 @@
 # AlphaCore — Autonomous Crypto Quant
-# Core dependencies
+# Core
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
+starlette>=0.37.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
@@ -13,8 +14,6 @@ sqlalchemy>=2.0.0
 # Data processing
 pandas>=2.0.0
 numpy>=1.24.0
-
-# Technical indicators
 pandas-ta>=0.3.0
 
 # Machine learning
@@ -23,12 +22,11 @@ transformers>=4.30.0
 
 # Crypto data
 python-binance>=1.0.0
-ccxt>=4.0.0
 
 # Agent framework
 langgraph>=0.2.0
 
-# Dashboard
+# Dashboard (Streamlit — legacy, kept for compatibility)
 streamlit>=1.28.0
 streamlit-autorefresh>=1.0.0
 plotly>=5.17.0
@@ -39,14 +37,8 @@ apscheduler>=3.10.0
 # Lock mechanism
 filelock>=3.0.0
 
-# RSS fallback
+# RSS news
 feedparser>=6.0.0
-
-# Reddit API
-praw>=7.7.0
 
 # Testing
 pytest>=8.0.0
-
-# Deployment
-docker-compose>=1.29.0
