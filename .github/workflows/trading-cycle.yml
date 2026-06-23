@@ -1,0 +1,44 @@
+name: Trading Cycle
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+env:
+  BINANCE_TESTNET: "true"
+  CRYPTOPANIC_API_KEY: ${{ secrets.CRYPTOPANIC_API_KEY }}
+  COINGECKO_API_KEY: ""
+  CRYPTOCOMPARE_API_KEY: ""
+  REDDIT_CLIENT_ID: ""
+  REDDIT_CLIENT_SECRET: ""
+  REDDIT_USER_AGENT: "AlphaCore/1.0"
+  LOG_LEVEL: "INFO"
+  PORTFOLIO_INITIAL_CAPITAL: "10000"
+  MAX_POSITION_SIZE_PCT: "0.05"
+  MAX_POSITION_SIZE_USD: "500"
+  STOP_LOSS_PCT: "0.03"
+  TRADING_FEE_PCT: "0.001"
+  TRADING_PAUSED: "false"
+  MODEL_CHECKPOINT_DIR: "./models_saved"
+  DATA_CACHE_DIR: "./data_cache"
+  ALERT_WEBHOOK_URL: ""
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run one trading cycle
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python run_once.py
