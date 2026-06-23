@@ -10,6 +10,7 @@ requests>=2.31.0
 
 # Database
 sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0        # PostgreSQL driver (SQLite uses built-in)
 
 # Data processing
 pandas>=2.0.0
