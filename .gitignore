@@ -15,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/lib/          # frontend source — not a build artifact
 lib64/
 parts/
 sdist/
