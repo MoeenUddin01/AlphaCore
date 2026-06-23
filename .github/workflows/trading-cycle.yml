@@ -34,11 +34,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libpq-dev
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install --no-cache-dir psycopg2-binary
+          python -c "import psycopg2; print('psycopg2 OK')"
 
       - name: Run one trading cycle
         env:
