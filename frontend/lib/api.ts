@@ -14,6 +14,10 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
     cache: "no-store",
+    headers: {
+      "ngrok-skip-browser-warning": "true",
+      ...options?.headers,
+    },
   });
   if (!res.ok) {
     throw new Error(`API ${res.status} ${res.statusText} — ${path}`);
