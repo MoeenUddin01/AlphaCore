@@ -54,13 +54,7 @@ class Settings(BaseSettings):
     TRADING_FEE_PCT: float = 0.001
     TRADING_PAUSED: bool = False
 
-    TRADING_PAIRS: Annotated[Json[list[str]], BeforeValidator(_parse_trading_pairs)] = [
-        "BTC/USDT",
-        "ETH/USDT",
-        "SOL/USDT",
-        "BNB/USDT",
-        "ADA/USDT",
-    ]
+    TRADING_PAIRS: Annotated[Json[list[str]], BeforeValidator(_parse_trading_pairs)] = '["BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","ADA/USDT"]'
 
     MODEL_CHECKPOINT_DIR: str = "./models_saved"
     DATA_CACHE_DIR: str = "./data_cache"

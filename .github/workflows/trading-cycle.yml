@@ -21,6 +21,7 @@ env:
   TRADING_FEE_PCT: "0.001"
   TRADING_PAUSED: "false"
   MODEL_CHECKPOINT_DIR: "./models_saved"
+  TRADING_PAIRS: '["BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","ADA/USDT"]'
   DATA_CACHE_DIR: "./data_cache"
   ALERT_WEBHOOK_URL: ""
 
