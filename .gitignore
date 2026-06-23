@@ -231,6 +231,7 @@ data_cache/
 *.parquet
 *.feather
 models_saved/
+!models_saved/*.pt          # exception: track trained checkpoints for deployment
 artifacts/
 logs/
 
