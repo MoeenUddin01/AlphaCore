@@ -7,6 +7,7 @@ Only trades that pass all checks proceed to the Execution Agent.
 
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from src.agents.agent_state import AgentState, ProposedTrade
@@ -15,6 +16,8 @@ from src.utils.helpers import send_alert
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
+
+_TRADING_PAUSED_FLAG = Path("data_cache/.trading_paused")
 
 
 class RiskAgent:
@@ -81,6 +84,21 @@ class RiskAgent:
                 "All trades rejected.",
                 drawdown_pct,
             )
+            try:
+                _TRADING_PAUSED_FLAG.parent.mkdir(parents=True, exist_ok=True)
+                _TRADING_PAUSED_FLAG.touch()
+                _logger.warning(
+                    "Auto-paused trading via %s due to %.2f%% drawdown",
+                    _TRADING_PAUSED_FLAG, drawdown_pct,
+                )
+                send_alert(
+                    f"AUTO-PAUSED trading: drawdown {drawdown_pct:.2f}% exceeded 15% "
+                    f"hard limit. Flag file written to {_TRADING_PAUSED_FLAG}. "
+                    f"Resume manually via API or by removing the flag file.",
+                    level="error",
+                )
+            except Exception as exc:
+                _logger.exception("Failed to write trading paused flag: %s", exc)
 
         for trade in state.get("proposed_trades", []):
             if getattr(trade, "is_auto_exit", False):

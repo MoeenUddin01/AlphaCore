@@ -27,9 +27,9 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **Paper Trading** — Binance Testnet integration with slippage modelling
 - **REST API** — FastAPI with 15+ endpoints for portfolio, trades, signals, health, sentiment validation, pause/resume
 - **Next.js Frontend** — dark-terminal themed dashboard with 5 pages: overview, signals, trades, risk, validation; live data via React Query polling; animated charts (Recharts, Framer Motion)
-- **Persistent Storage** — SQLite via SQLAlchemy ORM (6 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid` columns on `Trade`
+- **Persistent Storage** — PostgreSQL (Neon.tech) via SQLAlchemy ORM (6 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid` columns on `Trade`
 - **Sentiment Validation** — win-rate color-coded metric, sample-size progress bar, win/loss sentiment comparison chart, statistical readiness gate (requires ≥30 trades)
-- **Automated Scheduling** — 4-mode CLI entry point: `trade` (full stack), `api` (server only), `train` (LSTM training), `dashboard` (Streamlit); frontend started separately via `npm run dev`
+- **Decoupled Processes** — `--mode trade` runs scheduler only, `--mode api` runs API server only — separate OS processes sharing the same database; deploy on different machines or hosting platforms
 - **Scheduler** — APScheduler with 3 recurring jobs (trading cycle, cache refresh, health check) + one-shot model training on startup
 - **Training Data** — 2 years of 1h OHLCV via Binance Mainnet (read-only, no API key needed)
 - **Dockerized** — Docker Compose for one-command startup
@@ -48,7 +48,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 | Crypto data | python-binance (Testnet + Mainnet read-only), CoinGecko API |
 | News/sentiment | CoinDesk RSS (free, no API key) |
 | Feature engineering | pandas, numpy, pandas-ta |
-| Database | SQLAlchemy ORM, SQLite (dev) |
+| Database | SQLAlchemy ORM, PostgreSQL (Neon.tech) |
 | API server | FastAPI + Uvicorn |
 | Dashboard | Next.js 16, TypeScript, Tailwind v4, shadcn/ui, Recharts, Framer Motion |
 | Task scheduler | APScheduler |
@@ -92,7 +92,7 @@ BINANCE_API_KEY=your_testnet_api_key
 BINANCE_API_SECRET=your_testnet_api_secret
 BINANCE_TESTNET=true
 COINGECKO_API_KEY=
-DATABASE_URL=sqlite:///./alphacore.db
+DATABASE_URL=postgresql://user:pass@ep-xxx.us-east-2.aws.neon.tech/neondb?sslmode=require
 LOG_LEVEL=INFO
 PORTFOLIO_INITIAL_CAPITAL=10000
 MAX_POSITION_SIZE_PCT=0.05
@@ -113,7 +113,7 @@ ALERT_WEBHOOK_URL=
 AlphaCore provides a single entry point with four modes:
 
 ```bash
-# Full trading system — API server (background) + scheduler (foreground)
+# Scheduler only — runs trading cycles (no API server, no uvicorn)
 python main.py --mode trade
 
 # API server only (no scheduler)
@@ -205,7 +205,7 @@ Manager Agent        → sentiment-primary: rank by |sentiment|, side from senti
 Risk Agent           → screen each proposed trade (7 checks: size, concentration, exposure, drawdown, duplicate, correlation, SELL-without-holding; auto-exit bypasses all)
 Execution Agent      → validate LOT_SIZE + MIN_NOTIONAL, round qty down to step size, fire orders to Binance Testnet, record fee_paid
 Monitor (update)     → update P&L, persist positions to DB, compute portfolio state
-CRUD / Database      → persist everything to SQLite
+CRUD / Database      → persist everything to PostgreSQL (Neon.tech)
 ```
 
 ### Agent Roles
@@ -219,7 +219,7 @@ CRUD / Database      → persist everything to SQLite
 
 ## Database Schema
 
-Six SQLAlchemy ORM tables:
+Six SQLAlchemy ORM tables on PostgreSQL (Neon.tech):
 
 | Table | Key Columns |
 |---|---|---|

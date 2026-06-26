@@ -51,6 +51,15 @@ export interface PerformanceMetricsResponse {
   current_drawdown: number;
 }
 
+export interface StrategyDecayInfo {
+  recent_win_rate: number;
+  all_time_win_rate: number;
+  drop_pct_points: number;
+  recent_trades_count: number;
+  is_decaying: boolean;
+  message: string;
+}
+
 export interface SentimentValidationResponse {
   total_sentiment_trades: number;
   winning_trades: number;
@@ -62,6 +71,38 @@ export interface SentimentValidationResponse {
   avg_sentiment_score_winners: number;
   avg_sentiment_score_losers: number;
   is_statistically_ready: boolean;
+  strategy_decay: StrategyDecayInfo;
+}
+
+export interface HoldingResponse {
+  symbol: string;
+  quantity: number;
+  avg_entry_price: number;
+  current_price: number;
+  current_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+}
+
+export interface ClosedTradeResponse {
+  symbol: string;
+  buy_price: number;
+  sell_price: number;
+  quantity: number;
+  realized_pnl: number;
+  realized_pnl_pct: number;
+  opened_at: string;
+  closed_at: string;
+  is_pre_fix_artifact: boolean;
+}
+
+export interface WalletResponse {
+  cash_balance: number;
+  total_holdings_value: number;
+  total_unrealized_pnl: number;
+  total_realized_pnl: number;
+  holdings: HoldingResponse[];
+  closed_positions: ClosedTradeResponse[];
 }
 
 export interface HealthResponse {

@@ -17,12 +17,137 @@ from src.agents import run_cycle
 from src.data.data_pipeline import DataPipeline
 from src.database.connection import check_db_connection, init_db
 from src.database.crud import get_current_portfolio_state, is_cycle_already_processed, save_cycle, update_positions
+from src.database.models import Trade as TradeModel
 from src.utils.config import settings
+from src.utils.helpers import send_alert
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
 
 _LOCK_PATH = f"{settings.DATA_CACHE_DIR}/.trading_cycle.lock"
+
+_SANE_PORTFOLIO_MIN = Decimal("0")
+_SANE_PORTFOLIO_MAX_MULTIPLIER = Decimal("10")
+
+
+def validate_cycle_integrity(final_state: dict[str, Any]) -> list[str]:
+    """Check the completed cycle for data integrity violations.
+
+    Inspects the final agent state and the database for:
+      - FILLED trades missing executed_price or executed_quantity
+      - Closed positions (SELL matching a prior BUY) with null PnL
+      - Portfolio total_value outside a sane range
+      - peak_value that decreased since the previous cycle
+
+    Args:
+        final_state: The completed ``AgentState`` after the pipeline run.
+
+    Returns:
+        A list of human-readable violation strings. Empty list = all good.
+    """
+    violations: list[str] = []
+
+    # --- 1. Check FILLED trades in this cycle have fill details ---
+    initial_capital = settings.PORTFOLIO_INITIAL_CAPITAL
+    for et in final_state.get("executed_trades", []):
+        if et.status == "FILLED":
+            if et.executed_price is None or et.executed_price <= Decimal("0"):
+                violations.append(
+                    f"FILLED trade {et.proposal.symbol} {et.proposal.side} "
+                    f"(order={et.order_id}) has null/zero executed_price={et.executed_price}"
+                )
+            if et.executed_quantity is None or et.executed_quantity <= Decimal("0"):
+                violations.append(
+                    f"FILLED trade {et.proposal.symbol} {et.proposal.side} "
+                    f"(order={et.order_id}) has null/zero executed_quantity={et.executed_quantity}"
+                )
+
+        # --- 2. Check all DB FILLED trades have complete fill data ---
+    from src.database.connection import get_db
+
+    with get_db() as db:
+        filled_trades = (
+            db.query(TradeModel)
+            .filter(TradeModel.status == "FILLED", TradeModel.is_pre_fix_artifact == False)
+            .all()
+        )
+        for t in filled_trades:
+            if t.executed_price is None or t.executed_price <= Decimal("0"):
+                violations.append(
+                    f"DB FILLED trade #{t.id} {t.symbol} {t.side} "
+                    f"missing executed_price={t.executed_price}"
+                )
+            if t.executed_quantity is None or t.executed_quantity <= Decimal("0"):
+                violations.append(
+                    f"DB FILLED trade #{t.id} {t.symbol} {t.side} "
+                    f"missing executed_quantity={t.executed_quantity}"
+                )
+
+        # --- 3. Closed positions with null or zero PnL ---
+        sell_trades = (
+            db.query(TradeModel)
+            .filter(
+                TradeModel.side == "SELL",
+                TradeModel.status == "FILLED",
+                TradeModel.is_pre_fix_artifact == False,
+            )
+            .all()
+        )
+        for s in sell_trades:
+            if s.pnl is None or s.pnl == 0:
+                violations.append(
+                    f"Closed SELL trade #{s.id} {s.symbol} has "
+                    f"{'null' if s.pnl is None else 'zero'} pnl "
+                    f"(executed_price={s.executed_price}, qty={s.executed_quantity})"
+                )
+
+    # --- 4. Portfolio sanity ---
+    ps = final_state.get("portfolio_summary", {})
+    total_value = Decimal(str(ps.get("total_value", "0")))
+    peak_value = Decimal(str(ps.get("peak_value", "0")))
+
+    if total_value < _SANE_PORTFOLIO_MIN:
+        violations.append(
+            f"Portfolio total_value={total_value} is negative "
+            f"(min allowed={_SANE_PORTFOLIO_MIN})"
+        )
+
+    max_sane = initial_capital * _SANE_PORTFOLIO_MAX_MULTIPLIER
+    if total_value > max_sane:
+        violations.append(
+            f"Portfolio total_value={total_value} exceeds "
+            f"{_SANE_PORTFOLIO_MAX_MULTIPLIER}x initial capital "
+            f"({max_sane}) in a single cycle — likely a data error"
+        )
+
+    # --- 5. peak_value never decreases (against stored PortfolioState) ---
+    from src.database.models import PortfolioState as PortfolioStateModel
+
+    with get_db() as db:
+        pstate = (
+            db.query(PortfolioStateModel)
+            .filter(PortfolioStateModel.id == "singleton")
+            .first()
+        )
+        if pstate is not None and peak_value < pstate.peak_value - Decimal("0.01"):
+            violations.append(
+                f"peak_value decreased from stored {pstate.peak_value} "
+                f"to {peak_value} — state corruption detected"
+            )
+
+    if violations:
+        _logger.error(
+            "Cycle integrity VIOLATIONS (%d):\n%s",
+            len(violations),
+            "\n".join(f"  [{i+1}] {v}" for i, v in enumerate(violations)),
+        )
+        send_alert(
+            f"Cycle integrity check FAILED with {len(violations)} violation(s):\n"
+            + "\n".join(f"• {v}" for v in violations),
+            level="error",
+        )
+
+    return violations
 
 
 def run_trading_cycle() -> None:
@@ -64,6 +189,8 @@ def run_trading_cycle() -> None:
         cycle_id = save_cycle(final_state)
         update_positions(final_state)
 
+        validate_cycle_integrity(final_state)
+
         signals_count = len(final_state.get("signals", []))
         trades_count = len(final_state.get("executed_trades", []))
         ps = final_state.get("portfolio_summary", {})
@@ -78,6 +205,105 @@ def run_trading_cycle() -> None:
     finally:
         lock.release()
         _logger.debug("Released trading cycle lock at %s", _LOCK_PATH)
+
+
+def reconcile_positions() -> None:
+    """Daily reconciliation: compare DB positions against Binance actual balances.
+
+    Calls Binance's account balance endpoint and compares every asset
+    balance against what the Position table thinks we hold. If any
+    mismatch exceeds a small rounding tolerance, sends a critical alert
+    and auto-pauses trading.
+
+    Runs independently of the trading cycle — this is the belt-and-suspenders
+    check against the exact class of state corruption bugs that have
+    historically caused the worst losses in autonomous trading systems.
+    """
+    _logger.info("=== POSITION RECONCILIATION START ===")
+
+    from pathlib import Path
+
+    from src.data.binance_client import BinanceClient
+    from src.database.connection import get_db
+    from src.database.models import Position as PositionModel
+
+    _PAUSE_FLAG = Path("data_cache/.trading_paused")
+    binance = BinanceClient()
+    mismatches: list[str] = []
+
+    _TRACKED_ASSETS: set[str] = {
+        pair.split("/")[0] for pair in settings.TRADING_PAIRS
+    }
+
+    try:
+        account = binance._client.get_account()
+        balances: dict[str, float] = {}
+        for b in account.get("balances", []):
+            asset = b["asset"]
+            if asset not in _TRACKED_ASSETS:
+                continue
+            bal = float(b.get("free", 0)) + float(b.get("locked", 0))
+            if bal > 0.000001:
+                balances[asset] = bal
+    except Exception as exc:
+        msg = f"Failed to fetch Binance account balances: {exc}"
+        _logger.error(msg)
+        send_alert(msg, level="error")
+        return
+
+    db_positions_data: list[dict[str, Any]] = []
+    with get_db() as db:
+        for p in db.query(PositionModel).all():
+            db_positions_data.append({
+                "symbol": p.symbol,
+                "quantity": float(p.quantity),
+            })
+
+    for pos in db_positions_data:
+        asset = pos["symbol"].replace("/USDT", "")
+        db_qty = pos["quantity"]
+        exchange_qty = balances.pop(asset, 0.0)
+
+        if db_qty <= 0.000001 and exchange_qty <= 0.000001:
+            continue
+
+        diff = abs(Decimal(str(db_qty)) - Decimal(str(exchange_qty)))
+        tolerance = Decimal(str(max(db_qty, exchange_qty))) * Decimal("0.01")
+        if diff > tolerance:
+            mismatches.append(
+                f"{pos['symbol']}: DB={db_qty:.8f} Exchange={exchange_qty:.8f} "
+                f"(diff={float(diff):.8f})"
+            )
+
+    for asset, exchange_qty in balances.items():
+        pair = f"{asset}/USDT"
+        db_pos = next((p for p in db_positions_data if p["symbol"] == pair), None)
+        if db_pos is None and exchange_qty > 0.000001:
+            mismatches.append(
+                f"{pair}: not in DB but Exchange has {exchange_qty:.8f}"
+            )
+
+    if mismatches:
+        _logger.error(
+            "Position reconciliation FAILED — %d mismatch(es):\n%s",
+            len(mismatches), "\n".join(f"  • {m}" for m in mismatches),
+        )
+        try:
+            _PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+            _PAUSE_FLAG.touch()
+            _logger.warning("Trading auto-paused due to reconciliation failure")
+        except Exception as exc:
+            _logger.error("Failed to write pause flag: %s", exc)
+
+        send_alert(
+            f"🚨 POSITION RECONCILIATION FAILED — {len(mismatches)} mismatch(es). "
+            f"Trading auto-paused.\n" + "\n".join(f"• {m}" for m in mismatches),
+            level="error",
+        )
+    else:
+        _logger.info("Position reconciliation PASSED — all balances match")
+
+    _logger.info("=== POSITION RECONCILIATION DONE ===")
 
 
 def run_data_cache_refresh() -> None:

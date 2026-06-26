@@ -80,6 +80,21 @@ class ExecutionAgent:
         )
         return state
 
+    def _lookup_avg_entry_price(self, symbol: str) -> Decimal | None:
+        """Return the current avg_entry_price for *symbol* from the Position table.
+
+        Returns:
+            The average entry price as a Decimal, or ``None`` if no open position exists.
+        """
+        from src.database.connection import get_db
+        from src.database.models import Position
+
+        with get_db() as db:
+            pos = db.query(Position).filter(Position.symbol == symbol).first()
+            if pos and pos.quantity > 0 and pos.avg_entry_price:
+                return Decimal(str(pos.avg_entry_price))
+        return None
+
     def _execute_trade(self, trade: ProposedTrade, state: AgentState) -> ExecutedTrade | None:
         """Execute a single trade proposal.
 
@@ -106,7 +121,7 @@ class ExecutionAgent:
                 status="FAILED",
                 timestamp=state["timestamp"],
                 fee_paid=Decimal("0"),
-                pnl=Decimal("0"),
+                pnl=None,
             )
 
         slippage_pct = random.uniform(0.0, 0.0015)
@@ -152,7 +167,7 @@ class ExecutionAgent:
                     status="REJECTED_LOT_SIZE",
                     timestamp=state["timestamp"],
                     fee_paid=Decimal("0"),
-                    pnl=Decimal("0"),
+                    pnl=None,
                 )
 
         _logger.info(
@@ -175,16 +190,61 @@ class ExecutionAgent:
             else:
                 actual_fill = fill_price
             status_flag = "FILLED"
+            if executed_qty < qty:
+                _logger.warning(
+                    "PARTIAL FILL: %s %s — requested %s, got %s (%.2f%% filled). "
+                    "Position table updated with real filled amount.",
+                    side, sym_clean, qty, executed_qty,
+                    float(executed_qty) / float(qty) * 100 if qty > 0 else 0,
+                )
             _logger.info(
                 "Order filled: %s %s %s @ %s (id=%s)",
                 side, executed_qty, sym_clean, actual_fill, order_id,
             )
         except BinanceAPIException as exc:
-            _logger.error("Binance API error for %s %s: %s", side, sym_clean, exc)
-            order_id = ""
-            actual_fill = fill_price
-            executed_qty = Decimal("0")
-            status_flag = "FAILED"
+            error_code = getattr(exc, "code", None)
+            if error_code == -1003:
+                _logger.warning(
+                    "Binance rate limit hit on %s %s (code=-1003). "
+                    "Backing off 60s before retry.",
+                    side, sym_clean,
+                )
+                import time as _time
+                _time.sleep(60)
+                _logger.info("Retrying %s %s after rate-limit backoff", side, sym_clean)
+                try:
+                    order = self.binance._client.create_order(
+                        symbol=sym_clean,
+                        side=side,
+                        type="MARKET",
+                        quantity=float(qty),
+                    )
+                    order_id = order.get("orderId", str(order.get("clientOrderId", "unknown")))
+                    executed_qty = Decimal(str(order.get("executedQty", qty)))
+                    cum_quote = Decimal(str(order.get("cummulativeQuoteQty", "0")))
+                    if executed_qty > Decimal("0"):
+                        actual_fill = (cum_quote / executed_qty).quantize(Decimal("0.01"))
+                    else:
+                        actual_fill = fill_price
+                    status_flag = "FILLED"
+                    _logger.info(
+                        "Retry succeeded: %s %s %s @ %s (id=%s)",
+                        side, executed_qty, sym_clean, actual_fill, order_id,
+                    )
+                except BinanceAPIException as retry_exc:
+                    _logger.error(
+                        "Retry also failed for %s %s: %s", side, sym_clean, retry_exc,
+                    )
+                    order_id = ""
+                    actual_fill = fill_price
+                    executed_qty = Decimal("0")
+                    status_flag = "FAILED"
+            else:
+                _logger.error("Binance API error for %s %s: %s", side, sym_clean, exc)
+                order_id = ""
+                actual_fill = fill_price
+                executed_qty = Decimal("0")
+                status_flag = "FAILED"
         except Exception as exc:
             _logger.error("Unexpected error for %s %s: %s", side, sym_clean, exc)
             order_id = ""
@@ -194,6 +254,22 @@ class ExecutionAgent:
 
         fee_amount = executed_qty * actual_fill * Decimal(str(settings.TRADING_FEE_PCT))
 
+        if side == "SELL" and status_flag == "FILLED" and executed_qty > 0:
+            avg_entry = self._lookup_avg_entry_price(symbol)
+            if avg_entry is not None and avg_entry > 0:
+                pnl = (actual_fill - avg_entry) * executed_qty - fee_amount
+                _logger.info(
+                    "PnL for %s SELL: avg_entry=%s fill=%s qty=%s fee=%s → pnl=%s",
+                    symbol, avg_entry, actual_fill, executed_qty, fee_amount, pnl,
+                )
+            else:
+                pnl = None
+                _logger.warning(
+                    "Cannot compute PnL for %s SELL — no avg_entry_price in Position table", symbol,
+                )
+        else:
+            pnl = None
+
         return ExecutedTrade(
             proposal=trade,
             executed_price=actual_fill,
@@ -202,5 +278,5 @@ class ExecutionAgent:
             status=status_flag,
             timestamp=state["timestamp"],
             fee_paid=fee_amount,
-            pnl=Decimal("0"),
+            pnl=pnl,
         )

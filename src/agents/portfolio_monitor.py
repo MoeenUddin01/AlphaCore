@@ -97,8 +97,21 @@ class PortfolioMonitor:
                 "return_pct": float(return_pct),
             })
 
-        cash = Decimal(str(portfolio.get("total_value", settings.PORTFOLIO_INITIAL_CAPITAL))) - total_position_value
-        total_value = total_position_value + cash
+        from src.database.crud import _compute_cash_from_trades  # lazy import to avoid circular dependency
+        cash = _compute_cash_from_trades(Decimal(str(settings.PORTFOLIO_INITIAL_CAPITAL)))
+        # Current-cycle trades haven't been saved to DB yet, so adjust cash manually
+        for et in state.get("executed_trades", []):
+            if et.status != "FILLED":
+                continue
+            qty = et.executed_quantity
+            price = et.executed_price
+            fee = getattr(et, "fee_paid", Decimal("0"))
+            amount = qty * price
+            if et.proposal.side == "BUY":
+                cash -= amount + fee
+            elif et.proposal.side == "SELL":
+                cash += amount - fee
+        total_value = cash + total_position_value
         total_unrealised_pnl = sum(Decimal(str(p.get("unrealized_pnl", 0))) for p in position_details)
         total_return_pct = (
             (total_value - Decimal(str(settings.PORTFOLIO_INITIAL_CAPITAL)))

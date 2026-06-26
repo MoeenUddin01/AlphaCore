@@ -4,6 +4,7 @@ Exposes portfolio snapshots, performance metrics, cycle summaries,
 and current open positions via a FastAPI ``APIRouter``.
 """
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -11,17 +12,24 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import desc
 
 from src.api.schemas import (
+    ClosedTradeResponse,
     CycleRunResponse,
+    HoldingResponse,
     PerformanceMetricsResponse,
     PortfolioSnapshotResponse,
+    WalletResponse,
 )
+from src.data.binance_client import BinanceClient
 from src.database.connection import get_db
 from src.database.crud import (
+    _compute_cash_from_trades,
+    check_strategy_decay,
     get_performance_metrics,
     get_portfolio_history,
     get_sentiment_trade_performance,
 )
-from src.database.models import CycleRun, Position
+from src.database.models import CycleRun, Position, Trade
+from src.utils.config import settings
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -127,6 +135,171 @@ def list_positions() -> list[dict[str, Any]]:
 
 
 @router.get(
+    "/wallet",
+    response_model=WalletResponse,
+    summary="Full portfolio wallet snapshot",
+    description="Return cash balance, current open holdings with live prices, "
+    "and every completed BUY→SELL pairing reconstructed from trade history. "
+    "Trades flagged as pre-fix artifacts are listed individually but excluded "
+    "from aggregate realised P&L.",
+)
+def wallet() -> WalletResponse:
+    _logger.info("GET /portfolio/wallet")
+    try:
+        binance = BinanceClient()
+
+        # --- Cash balance ---
+        cash = _compute_cash_from_trades(Decimal(str(settings.PORTFOLIO_INITIAL_CAPITAL)))
+
+        # --- Holdings from Position table with live prices ---
+        holdings_list: list[dict[str, Any]] = []
+        total_holdings_value = Decimal("0")
+        total_unrealised_pnl = Decimal("0")
+
+        with get_db() as db:
+            positions = db.query(Position).all()
+            for p in positions:
+                if p.quantity <= 0:
+                    continue
+                try:
+                    live_price = Decimal(str(binance.get_current_price(p.symbol)))
+                except Exception:
+                    live_price = Decimal(str(p.current_price)) if p.current_price else Decimal("0")
+                qty = Decimal(str(p.quantity))
+                avg_entry = Decimal(str(p.avg_entry_price)) if p.avg_entry_price else Decimal("0")
+                current_value = qty * live_price
+                unrealised = (live_price - avg_entry) * qty if avg_entry > 0 else Decimal("0")
+                unrealised_pct = ((live_price - avg_entry) / avg_entry * 100) if avg_entry > 0 else Decimal("0")
+
+                total_holdings_value += current_value
+                total_unrealised_pnl += unrealised
+
+                holdings_list.append(HoldingResponse(
+                    symbol=p.symbol,
+                    quantity=float(qty),
+                    avg_entry_price=float(avg_entry),
+                    current_price=float(live_price),
+                    current_value=float(current_value),
+                    unrealized_pnl=float(unrealised),
+                    unrealized_pnl_pct=float(unrealised_pct),
+                ))
+
+            # --- Closed positions: FIFO BUY→SELL pairing from Trade history ---
+            all_trades_raw = (
+                db.query(Trade)
+                .filter(Trade.status == "FILLED")
+                .order_by(Trade.created_at)
+                .all()
+            )
+            # Materialise trade data inside the session to avoid DetachedInstanceError
+            trade_rows: list[dict[str, Any]] = [
+                {
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "executed_quantity": Decimal(str(t.executed_quantity or 0)),
+                    "executed_price": Decimal(str(t.executed_price or 0)),
+                    "pnl": Decimal(str(t.pnl)) if t.pnl is not None else None,
+                    "created_at": t.created_at,
+                    "is_pre_fix_artifact": t.is_pre_fix_artifact if hasattr(t, "is_pre_fix_artifact") else False,
+                }
+                for t in all_trades_raw
+            ]
+
+        closed_list: list[dict[str, Any]] = []
+        buy_queue: dict[str, list[dict[str, Any]]] = {}
+
+        for row in trade_rows:
+            sym = row["symbol"]
+            qty = row["executed_quantity"]
+            price = row["executed_price"]
+            side = row["side"]
+
+            if side == "BUY":
+                if sym not in buy_queue:
+                    buy_queue[sym] = []
+                buy_queue[sym].append({
+                    "remaining": qty,
+                    "price": price,
+                    "opened_at": row["created_at"],
+                    "is_artifact": row["is_pre_fix_artifact"],
+                })
+
+            elif side == "SELL":
+                remaining_sell = qty
+                buy_prices: list[tuple[Decimal, Decimal, datetime, bool]] = []
+                buys_for_sym = buy_queue.get(sym, [])
+
+                while remaining_sell > 0 and buys_for_sym:
+                    buy = buys_for_sym[0]
+                    used = min(remaining_sell, buy["remaining"])
+                    buy_prices.append((
+                        used,
+                        buy["price"],
+                        buy["opened_at"],
+                        buy["is_artifact"],
+                    ))
+                    buy["remaining"] -= used
+                    remaining_sell -= used
+                    if buy["remaining"] <= Decimal("0"):
+                        buys_for_sym.pop(0)
+
+                if not buy_prices:
+                    _logger.warning("No matching BUY found for SELL %s qty=%s", sym, qty)
+                    continue
+
+                weighted_buy_price = (
+                    sum(u * p for u, p, _, _ in buy_prices) / qty
+                    if qty > 0 else Decimal("0")
+                )
+                earliest_open = min(oa for _, _, oa, _ in buy_prices)
+                is_any_artifact = any(ia for _, _, _, ia in buy_prices)
+
+                realized_pnl = row["pnl"] if row["pnl"] is not None else Decimal("0")
+                realized_pnl_pct = ((price - weighted_buy_price) / weighted_buy_price * 100) if weighted_buy_price > 0 else Decimal("0")
+
+                # Flag as artifact if either the matched buys or the sell itself is marked
+                is_artifact = is_any_artifact or row["is_pre_fix_artifact"]
+
+                closed_list.append({
+                    "symbol": sym,
+                    "buy_price": float(weighted_buy_price),
+                    "sell_price": float(price),
+                    "quantity": float(qty),
+                    "realized_pnl": float(realized_pnl),
+                    "realized_pnl_pct": float(realized_pnl_pct),
+                    "opened_at": earliest_open,
+                    "closed_at": row["created_at"],
+                    "is_pre_fix_artifact": is_artifact,
+                })
+
+        # Aggregate realised PnL excluding pre-fix artifacts
+        total_realised_excl_artifacts = sum(
+            Decimal(str(c["realized_pnl"]))
+            for c in closed_list
+            if not c["is_pre_fix_artifact"]
+        )
+
+        closed_responses = [ClosedTradeResponse(**c) for c in closed_list]
+
+        resp = WalletResponse(
+            cash_balance=float(cash),
+            total_holdings_value=float(total_holdings_value),
+            total_unrealized_pnl=float(total_unrealised_pnl),
+            total_realized_pnl=float(total_realised_excl_artifacts),
+            holdings=holdings_list,
+            closed_positions=closed_responses,
+        )
+        _logger.info(
+            "GET /portfolio/wallet -> cash=%.2f, %d holding(s), %d closed trade(s)",
+            resp.cash_balance, len(resp.holdings), len(resp.closed_positions),
+        )
+        return resp
+    except Exception:
+        _logger.exception("GET /portfolio/wallet failed")
+        raise HTTPException(status_code=500, detail="Failed to fetch portfolio wallet")
+
+
+@router.get(
     "/sentiment-validation",
     summary="Validate sentiment trading edge",
     description="Validates whether sentiment-driven trading has real edge. "
@@ -137,6 +310,7 @@ def sentiment_validation(days: int = 30) -> dict[str, Any]:
     _logger.info("GET /portfolio/sentiment-validation (days=%d)", days)
     try:
         result = get_sentiment_trade_performance(days=days)
+        result["strategy_decay"] = check_strategy_decay()
         _logger.info(
             "GET /portfolio/sentiment-validation -> %d trades, win_rate=%.2f%%",
             result["total_sentiment_trades"],

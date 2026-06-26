@@ -17,6 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from src.database.connection import init_db
 from src.scheduler.jobs import (
     health_check_job,
+    reconcile_positions,
     run_data_cache_refresh,
     run_model_training,
     run_trading_cycle,
@@ -68,6 +69,13 @@ class SchedulerRunner:
             health_check_job,
             trigger=IntervalTrigger(minutes=5),
             id="health_check",
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            reconcile_positions,
+            trigger=IntervalTrigger(hours=24),
+            id="reconcile_positions",
             replace_existing=True,
         )
 

@@ -7,9 +7,10 @@ Single entry point for all system modes:
         pairs, then exit.
 
     ``python main.py --mode trade``
-        Full trading mode: start the FastAPI server in a background
-        thread, then run the APScheduler loop (data pipeline → ML
-        prediction → agent pipeline → persist).
+        Scheduler-only mode: run the APScheduler loop (data pipeline
+        → ML prediction → agent pipeline → persist).  No API server
+        is started — deploy as a separate process on any machine that
+        shares the same database.
 
     ``python main.py --mode api``
         Start only the FastAPI REST API server (no scheduler).
@@ -21,8 +22,6 @@ Single entry point for all system modes:
 import argparse
 import os
 import sys
-import threading
-
 import uvicorn
 
 from src.database.connection import init_db
@@ -59,23 +58,10 @@ def _run_train() -> None:
 
 
 def _run_trade() -> None:
-    """Start API server (background) + scheduler (foreground)."""
+    """Scheduler-only: start the trading cycle loop (no API server)."""
     _logger.info("Starting in TRADE mode")
     _print_banner("trade")
     init_db()
-
-    api_thread = threading.Thread(
-        target=uvicorn.run,
-        kwargs={
-            "app": "src.api.main:app",
-            "host": "0.0.0.0",
-            "port": 8000,
-            "log_level": "info",
-        },
-        daemon=True,
-    )
-    api_thread.start()
-    _logger.info("FastAPI server started on http://0.0.0.0:8000")
 
     runner = SchedulerRunner()
     runner.setup_jobs()

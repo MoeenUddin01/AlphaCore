@@ -86,6 +86,7 @@ class Trade(Base):
     reasoning = Column(Text, nullable=True)
     pnl = Column(Numeric(20, 8), nullable=True)
     fee_paid = Column(Numeric(20, 8), nullable=True)
+    is_pre_fix_artifact = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 

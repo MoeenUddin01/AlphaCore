@@ -64,6 +64,27 @@ export default function ValidationPage() {
           </FadeIn>
         )}
 
+        {data?.strategy_decay?.is_decaying && (
+          <FadeIn>
+            <div className="rounded-md border border-red-800 bg-red-950/50 p-4">
+              <div className="flex items-start gap-3">
+                <span className="text-red-400 mt-0.5 shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </span>
+                <div>
+                  <p className="text-[13px] font-medium text-red-300">Strategy decay detected</p>
+                  <p className="text-[12px] text-red-400/80 mt-0.5">{data.strategy_decay.message}</p>
+                  <div className="flex gap-4 mt-2 text-[11px] text-zinc-400">
+                    <span>Recent win rate: <span className="text-red-300">{data.strategy_decay.recent_win_rate.toFixed(1)}%</span></span>
+                    <span>All-time win rate: <span className="text-zinc-300">{data.strategy_decay.all_time_win_rate.toFixed(1)}%</span></span>
+                    <span>Drop: <span className="text-red-400">{data.strategy_decay.drop_pct_points.toFixed(1)}pp</span></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </FadeIn>
+        )}
+
         {/* Win rate */}
         <FadeIn delay={0.1}>
           <div className="rounded-md border border-zinc-800 p-6 bg-zinc-900 text-center">

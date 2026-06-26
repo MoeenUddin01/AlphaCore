@@ -92,8 +92,9 @@ def _migrate_trades_table(db_engine: Engine) -> None:
     existing = {col["name"] for col in inspector.get_columns("trades")}
 
     _MISSING_COLS: dict[str, str] = {
-        "is_sentiment_driven": "BOOLEAN NOT NULL DEFAULT 1",
+        "is_sentiment_driven": "BOOLEAN NOT NULL DEFAULT TRUE",
         "fee_paid": "NUMERIC(20, 8)",
+        "is_pre_fix_artifact": "BOOLEAN NOT NULL DEFAULT FALSE",
     }
 
     with db_engine.connect() as conn:

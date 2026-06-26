@@ -97,6 +97,49 @@ class CycleRunResponse(BaseModel):
     model_config: Any = ConfigDict(from_attributes=True)
 
 
+class HoldingResponse(BaseModel):
+    """An open position in the current portfolio."""
+
+    symbol: str
+    quantity: float
+    avg_entry_price: float
+    current_price: float
+    current_value: float
+    unrealized_pnl: float
+    unrealized_pnl_pct: float
+
+    model_config: Any = ConfigDict(from_attributes=True)
+
+
+class ClosedTradeResponse(BaseModel):
+    """A fully-closed BUY→SELL pair from trade history."""
+
+    symbol: str
+    buy_price: float
+    sell_price: float
+    quantity: float
+    realized_pnl: float
+    realized_pnl_pct: float
+    opened_at: datetime
+    closed_at: datetime
+    is_pre_fix_artifact: bool = False
+
+    model_config: Any = ConfigDict(from_attributes=True)
+
+
+class WalletResponse(BaseModel):
+    """Full portfolio wallet snapshot — cash, open positions, closed trades."""
+
+    cash_balance: float
+    total_holdings_value: float
+    total_unrealized_pnl: float
+    total_realized_pnl: float
+    holdings: list[HoldingResponse]
+    closed_positions: list[ClosedTradeResponse]
+
+    model_config: Any = ConfigDict(from_attributes=True)
+
+
 class HealthResponse(BaseModel):
     """API health check response."""
 

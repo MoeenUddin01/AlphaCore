@@ -9,11 +9,13 @@ import {
   Receipt,
   ShieldAlert,
   FlaskConical,
+  Wallet,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
 const NAV_ITEMS = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
+  { href: "/wallet", label: "Wallet", icon: Wallet },
   { href: "/signals", label: "Signals", icon: Activity },
   { href: "/trades", label: "Trades", icon: Receipt },
   { href: "/risk", label: "Risk", icon: ShieldAlert },

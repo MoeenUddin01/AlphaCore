@@ -130,45 +130,122 @@ def save_cycle(state: AgentState) -> str:
 
 
 def update_positions(state: AgentState) -> None:
-    """Upsert the ``Position`` table from the current portfolio summary.
+    """Update the ``Position`` table from executed trades and portfolio metadata.
 
-    Reads the position list inside ``portfolio_summary`` and merges
-    each entry into the ``positions`` table (insert or update based on
-    the unique ``symbol`` column).
+    Quantity changes are sourced from ``executed_trades`` directly — BUY
+    increments, SELL decrements — ensuring the Position table always
+    reflects the system's actual fills regardless of the pipeline path
+    that produced them.  Metadata (current_price, unrealized_pnl) is
+    sourced from ``portfolio_summary.positions`` when available.
+
+    .. warning::
+
+       This function reads quantity changes from ``state["executed_trades"]``,
+       **not** from the ``Trade`` table.  Any trade that lands in the Trade
+       table outside the normal scheduled cycle (e.g. a manually-placed order,
+       a backfilled row, or a direct DB insert) will **never** be reconciled
+       into the Position table by this function.  There is no periodic
+       reconciliation that syncs Trade → Position.
+
+       **Rule**: trades executed outside the pipeline must be manually
+       reconciled into the Position table immediately after execution.
+       Do not assume they will self-correct on the next cycle.
 
     Args:
-        state: The ``AgentState`` with ``portfolio_summary`` populated.
+        state: The ``AgentState`` with ``executed_trades`` populated.
     """
+    executed_trades = state.get("executed_trades", [])
     ps = state.get("portfolio_summary", {})
     positions_list: list[dict[str, Any]] = ps.get("positions", [])
     now = datetime.utcnow()
 
-    if not positions_list:
-        _logger.debug("No positions to update")
+    if not executed_trades and not positions_list:
+        _logger.debug("No executed trades or positions to update")
         return
 
     with get_db() as db:
+        # 1. Apply metadata from portfolio_summary.positions
         for pos in positions_list:
             symbol = pos.get("symbol", "")
             existing = db.query(Position).filter(Position.symbol == symbol).first()
             if existing:
-                existing.quantity = Decimal(str(pos.get("quantity", 0)))
-                existing.avg_entry_price = Decimal(str(pos.get("avg_entry_price", 0)))
                 existing.current_price = Decimal(str(pos.get("current_price", 0)))
                 existing.unrealised_pnl = Decimal(str(pos.get("unrealized_pnl", 0)))
                 existing.updated_at = now
-            else:
-                position = Position(
-                    symbol=symbol,
-                    quantity=Decimal(str(pos.get("quantity", 0))),
-                    avg_entry_price=Decimal(str(pos.get("avg_entry_price", 0))),
-                    current_price=Decimal(str(pos.get("current_price", 0))),
-                    unrealised_pnl=Decimal(str(pos.get("unrealized_pnl", 0))),
-                    updated_at=now,
-                )
-                db.add(position)
 
-    _logger.info("Upserted %d position(s)", len(positions_list))
+        # 2. Apply quantity changes from executed_trades
+        trades_applied = 0
+        for et in executed_trades:
+            if et.status != "FILLED":
+                continue
+            trade = et.proposal
+            symbol = trade.symbol
+            side = trade.side
+            qty = et.executed_quantity
+            price = et.executed_price
+
+            existing = db.query(Position).filter(Position.symbol == symbol).first()
+
+            if side == "BUY":
+                if existing:
+                    total_qty = existing.quantity + qty
+                    total_cost = (existing.quantity * existing.avg_entry_price) + (qty * price)
+                    existing.quantity = total_qty
+                    existing.avg_entry_price = total_cost / total_qty if total_qty > 0 else existing.avg_entry_price
+                    existing.updated_at = now
+                else:
+                    position = Position(
+                        symbol=symbol,
+                        quantity=qty,
+                        avg_entry_price=price,
+                        current_price=price,
+                        unrealised_pnl=Decimal("0"),
+                        updated_at=now,
+                    )
+                    db.add(position)
+                trades_applied += 1
+                _logger.info("Position added/updated: %s qty=%s avg_entry=%s", symbol, qty, price)
+
+            elif side == "SELL":
+                if existing:
+                    existing.quantity -= qty
+                    if existing.quantity <= Decimal("0"):
+                        db.delete(existing)
+                        _logger.info("Position fully closed (SELL): %s", symbol)
+                    else:
+                        existing.updated_at = now
+                        _logger.info("Position reduced (SELL): %s qty=%s", symbol, existing.quantity)
+                    trades_applied += 1
+                else:
+                    _logger.warning("SELL executed for %s but no open Position row found", symbol)
+
+    _logger.info("Updated positions from %d executed trade(s) and %d portfolio position(s)",
+                 trades_applied, len(positions_list))
+
+
+def _compute_cash_from_trades(initial_capital: Decimal) -> Decimal:
+    """Compute available cash from all-time filled trade history.
+
+    Args:
+        initial_capital: The starting portfolio capital.
+
+    Returns:
+        Cash balance = initial_capital - total_spent_on_buys + total_received_from_sells.
+    """
+    total_spent = Decimal("0")
+    total_received = Decimal("0")
+    with get_db() as db:
+        trades = db.query(Trade).filter(Trade.status == "FILLED").all()
+        for t in trades:
+            qty = Decimal(str(t.executed_quantity or 0))
+            price = Decimal(str(t.executed_price or 0))
+            fee = Decimal(str(t.fee_paid or 0))
+            amount = qty * price
+            if t.side == "BUY":
+                total_spent += amount + fee
+            elif t.side == "SELL":
+                total_received += amount - fee
+    return initial_capital - total_spent + total_received
 
 
 def get_current_portfolio_state() -> dict[str, Any]:
@@ -241,20 +318,17 @@ def get_current_portfolio_state() -> dict[str, Any]:
         else:
             peak_value = pstate.peak_value
 
+    cash = _compute_cash_from_trades(initial_capital)
+    total_value = cash + total_position_value
+
+    with get_db() as db:
         latest_snapshot = (
             db.query(PortfolioSnapshot)
             .order_by(desc(PortfolioSnapshot.created_at))
             .first()
         )
         if latest_snapshot:
-            last_total_value = Decimal(str(latest_snapshot.total_value))
             total_realised_pnl = Decimal(str(latest_snapshot.realised_pnl)) if latest_snapshot.realised_pnl else Decimal("0")
-        else:
-            last_total_value = initial_capital
-            total_realised_pnl = Decimal("0")
-
-    cash = last_total_value - total_position_value
-    total_value = cash + total_position_value
 
     if total_value > peak_value:
         peak_value = total_value
@@ -494,6 +568,79 @@ def get_performance_metrics() -> dict[str, Any]:
             metrics["current_drawdown_pct"] = float(latest_dd)
 
     return metrics
+
+
+def check_strategy_decay() -> dict[str, Any]:
+    """Detect strategy decay by comparing recent vs all-time win rate.
+
+    Queries the most recent 10 filled trades and compares their win rate
+    against the all-time win rate. If the recent win rate has fallen
+    more than 20 percentage points below the all-time rate, the strategy
+    may be degrading in current market conditions.
+
+    Returns:
+        Dict with keys: ``recent_win_rate``, ``all_time_win_rate``,
+        ``drop_pct_points``, ``recent_trades_count``, ``is_decaying``,
+        ``message``. If fewer than 10 recent trades exist, ``is_decaying``
+        is ``False`` with a ``message`` explaining insufficient data.
+    """
+    result: dict[str, Any] = {
+        "recent_win_rate": 0.0,
+        "all_time_win_rate": 0.0,
+        "drop_pct_points": 0.0,
+        "recent_trades_count": 0,
+        "is_decaying": False,
+        "message": "",
+    }
+
+    with get_db() as db:
+        all_filled = (
+            db.query(Trade.pnl)
+            .filter(Trade.status == "FILLED", Trade.pnl.isnot(None))
+            .order_by(desc(Trade.created_at))
+            .all()
+        )
+
+    pnl_list = [float(row[0]) for row in all_filled if row[0] is not None]
+    total = len(pnl_list)
+
+    if total < 10:
+        result["message"] = (
+            f"Insufficient trades for decay analysis "
+            f"({total} filled trades, need at least 10)"
+        )
+        return result
+
+    recent = pnl_list[:10]
+    all_pnl = pnl_list
+
+    recent_wins = sum(1 for p in recent if p > 0)
+    all_wins = sum(1 for p in all_pnl if p > 0)
+
+    recent_win_rate = recent_wins / 10 * 100
+    all_time_win_rate = all_wins / total * 100
+    drop = all_time_win_rate - recent_win_rate
+
+    result["recent_win_rate"] = round(recent_win_rate, 2)
+    result["all_time_win_rate"] = round(all_time_win_rate, 2)
+    result["drop_pct_points"] = round(drop, 2)
+    result["recent_trades_count"] = 10
+
+    if drop > 20:
+        result["is_decaying"] = True
+        result["message"] = (
+            f"Strategy may be decaying: recent win rate {recent_win_rate:.1f}% "
+            f"is {drop:.1f}pp below all-time {all_time_win_rate:.1f}%. "
+            f"Consider reviewing strategy parameters or pausing trading."
+        )
+        _logger.warning("Strategy decay detected: %s", result["message"])
+    else:
+        result["message"] = (
+            f"Recent win rate {recent_win_rate:.1f}% is within "
+            f"{drop:.1f}pp of all-time {all_time_win_rate:.1f}% — no decay signal."
+        )
+
+    return result
 
 
 def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:

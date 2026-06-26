@@ -5,6 +5,7 @@ import type {
   SentimentValidationResponse,
   SignalResponse,
   TradeResponse,
+  WalletResponse,
 } from "./types";
 
 const BASE_URL =
@@ -13,6 +14,7 @@ const BASE_URL =
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
+    credentials: "include",
     cache: "no-store",
     headers: {
       "ngrok-skip-browser-warning": "true",
@@ -76,6 +78,10 @@ const api = {
 
   getTradeStats(): Promise<any> {
     return fetchApi<any>("/trades/stats");
+  },
+
+  getWallet(): Promise<WalletResponse> {
+    return fetchApi<WalletResponse>("/portfolio/wallet");
   },
 
   pauseTrading(): Promise<any> {

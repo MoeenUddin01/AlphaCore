@@ -2,7 +2,11 @@
 
 import { useQuery } from "@tanstack/react-query";
 import api from "../api";
-import type { PerformanceMetricsResponse, PortfolioSnapshotResponse } from "../types";
+import type {
+  PerformanceMetricsResponse,
+  PortfolioSnapshotResponse,
+  WalletResponse,
+} from "../types";
 
 export function usePortfolioHistory(limit?: number) {
   return useQuery<PortfolioSnapshotResponse[]>({
@@ -22,5 +26,13 @@ export function usePositions() {
   return useQuery<any[]>({
     queryKey: ["positions"],
     queryFn: () => api.getPositions(),
+  });
+}
+
+export function useWallet() {
+  return useQuery<WalletResponse>({
+    queryKey: ["wallet"],
+    queryFn: () => api.getWallet(),
+    refetchInterval: 60_000,
   });
 }
