@@ -225,6 +225,7 @@ __marimo__/
 *.env
 .env.*
 !.env.example
+!frontend/.env.production
 
 # Data and model files
 data_cache/
