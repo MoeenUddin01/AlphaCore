@@ -59,10 +59,13 @@ class PortfolioMonitor:
         """
         _logger.info("MonitorUpdate node — cycle %s", state["cycle_id"])
 
+        from src.database.crud import get_total_realised_pnl  # lazy import to avoid circular dependency
+
         portfolio = state.get("portfolio_summary", {})
         holdings_raw: dict[str, Any] = portfolio.get("holdings", {})
         peak_value = Decimal(str(portfolio.get("peak_value", settings.PORTFOLIO_INITIAL_CAPITAL)))
-        total_realised_pnl = Decimal(str(portfolio.get("total_realised_pnl", 0)))
+        # Query single source of truth: SUM(Trade.pnl) for all FILLED SELLs
+        total_realised_pnl = get_total_realised_pnl()
 
         # Build positions from holdings + current cycle's executed trades
         positions = self._merge_positions(holdings_raw, state.get("executed_trades", []))
@@ -118,9 +121,10 @@ class PortfolioMonitor:
             / Decimal(str(settings.PORTFOLIO_INITIAL_CAPITAL)) * 100
         ) if settings.PORTFOLIO_INITIAL_CAPITAL > 0 else Decimal("0")
 
-        # Add current cycle's realised PnL from SELL trades
-        current_realised = self._compute_realised_pnl(state.get("executed_trades", []), holdings_raw)
-        total_realised_pnl += current_realised
+        # Add current cycle's realised PnL from SELL trades (not yet in DB)
+        for et in state.get("executed_trades", []):
+            if et.status == "FILLED" and et.proposal.side == "SELL" and et.pnl is not None:
+                total_realised_pnl += et.pnl
 
         if total_value > peak_value:
             peak_value = total_value
@@ -326,30 +330,3 @@ class PortfolioMonitor:
 
         return positions
 
-    def _compute_realised_pnl(
-        self,
-        executed_trades: list[Any],
-        holdings_raw: dict[str, Any],
-    ) -> Decimal:
-        """Compute realised P&L from SELL trades in the current cycle.
-
-        Args:
-            executed_trades: Trades executed in this cycle.
-            holdings_raw: Holdings at the start of the cycle.
-
-        Returns:
-            Total realised P&L as a Decimal.
-        """
-        total = Decimal("0")
-        for et in executed_trades:
-            if et.status != "FILLED" or et.proposal.side != "SELL":
-                continue
-            trade = et.proposal
-            qty = et.executed_quantity
-            price = et.executed_price
-            hdata = holdings_raw.get(trade.symbol, {})
-            avg_entry = Decimal(str(hdata.get("avg_entry_price", 0))) if isinstance(hdata, dict) else Decimal("0")
-            if avg_entry > 0:
-                realised = (price - avg_entry) * qty
-                total += realised
-        return total

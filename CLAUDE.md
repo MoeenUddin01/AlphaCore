@@ -195,3 +195,4 @@ database/crud.py      → persist everything to DB
 - Use `src/utils/logger.py` for all logging — never use `print()` in production code.
 - The system must be fully runnable with `docker-compose up` after Phase 9.
 - Paper trading only — never connect to Binance live account, always use Testnet.
+- **Code change = process restart required.** Both `--mode api` and `--mode trade` are long-lived Python processes that import all modules at startup and never reload. Any change to `*.py` files (especially `crud.py`, `agents/`, `api/`, `models/`) requires explicitly killing and restarting the affected process. There is no hot-reload. This rule applies identically to both processes — if you edit query logic, restart the API. If you edit pipeline/agent logic, restart the scheduler. When in doubt, restart both with `kill <PID> && nohup ... &`.

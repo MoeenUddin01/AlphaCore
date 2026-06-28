@@ -120,6 +120,7 @@ class PortfolioState(Base):
     id = Column(String(20), primary_key=True, default="singleton")
     peak_value = Column(Numeric(20, 8), nullable=False, default=Decimal("0"))
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    validation_start_date = Column(DateTime, nullable=True)
 
 
 class PortfolioSnapshot(Base):

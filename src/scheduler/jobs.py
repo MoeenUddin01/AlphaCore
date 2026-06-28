@@ -16,8 +16,8 @@ from filelock import FileLock, Timeout
 from src.agents import run_cycle
 from src.data.data_pipeline import DataPipeline
 from src.database.connection import check_db_connection, init_db
-from src.database.crud import get_current_portfolio_state, is_cycle_already_processed, save_cycle, update_positions
-from src.database.models import Trade as TradeModel
+from src.database.crud import get_current_portfolio_state, get_total_realised_pnl, is_cycle_already_processed, save_cycle, update_positions
+from src.database.models import PortfolioSnapshot, Trade as TradeModel
 from src.utils.config import settings
 from src.utils.helpers import send_alert
 from src.utils.logger import get_logger
@@ -134,6 +134,23 @@ def validate_cycle_integrity(final_state: dict[str, Any]) -> list[str]:
                 f"peak_value decreased from stored {pstate.peak_value} "
                 f"to {peak_value} — state corruption detected"
             )
+
+        # --- 6. SUM(Trade.pnl) === latest PortfolioSnapshot.realised_pnl ---
+        latest_snap = (
+            db.query(PortfolioSnapshot)
+            .order_by(PortfolioSnapshot.created_at.desc())
+            .first()
+        )
+        if latest_snap is not None:
+            db_pnl_total = get_total_realised_pnl()
+            snap_pnl = latest_snap.realised_pnl if latest_snap.realised_pnl else Decimal("0")
+            # Allow ±$0.01 for rounding
+            if abs(db_pnl_total - snap_pnl) > Decimal("0.01"):
+                violations.append(
+                    f"SUM(Trade.pnl)={db_pnl_total} diverges from "
+                    f"latest snapshot realised_pnl={snap_pnl} "
+                    f"(diff={db_pnl_total - snap_pnl}) — the two ledgers disagree"
+                )
 
     if violations:
         _logger.error(

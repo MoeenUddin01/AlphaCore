@@ -3,7 +3,8 @@
 A production-grade, multi-agent AI system that predicts cryptocurrency prices using LSTM deep learning models and FinBERT NLP sentiment analysis, then autonomously manages a crypto portfolio through four specialized agents: **Manager**, **Risk**, **Execution**, and **Portfolio Monitor**.
 
 > **Mode:** Paper trading (Binance Testnet) — safe for real-world deployment demo.  
-> **Target assets:** BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, ADA/USDT
+> **Target assets:** BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, ADA/USDT  
+> **Status:** Production live — 24/7 automated trading via local scheduler + Neon Postgres + Vercel dashboard
 
 ---
 
@@ -11,10 +12,10 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 - **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (CoinDesk RSS), Fear & Greed Index
 - **Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMAs, returns, volatility via `pandas-ta`
-- **Two ML Models Per Symbol** — `LSTMModel` for price direction (2-class, ~50% acc) and `LSTMClassifier` for volatility regime (sigmoid, ~83% acc)
+- **Two ML Models Per Symbol** — `LSTMModel` for price direction (2-class, ~50% acc — random) and `LSTMClassifier` for volatility regime (sigmoid, 76–89% test acc)
 - **Volatility Regime Prediction** — binary target from 4-candle price range vs 24-candle median; BCE loss, saves `_classifier_best.pt` checkpoints
 - **Sentiment Analysis** — FinBERT (ProsusAI/finbert) with **time-decay weighting** — fresher headlines contribute more via linear decay over 24h (10% floor); `avg_headline_age_hours` logged per headline batch
-- **Multi-Agent Pipeline** — 5-node LangGraph StateGraph: monitor_exits → Manager → Risk → Execution → monitor_update
+- **Multi-Agent Pipeline** — 5-node LangGraph StateGraph: monitor_exits → Manager → Risk → Execution → monitor_update (auto-exits detected and executed in the same cycle)
 - **Manager Agent (Option A)** — sentiment-primary trading; side determined solely by `abs(sentiment_score)` thresholds (`>0.30 BUY`, `<-0.30 SELL`); position halved in high-volatility regime; **paused mode** check skips new entry proposals when flag file exists (auto-exits still processed)
 - **Dual Position Caps** — percentage-based (5% of portfolio) AND absolute dollar cap ($500 USD) — `min()` protects against portfolio-value bugs
 - **Risk Management** — position sizing, concentration limits (≤20% per coin), total exposure caps (≤80%), drawdown circuit breaker (>15%), duplicate prevention, **correlation risk**, **SELL-without-holding guard** (spot-only safety)
@@ -26,7 +27,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **Mainnet Safety Guard** — two-env-var confirmation required for real-money trading: `BINANCE_TESTNET=false` AND `I_UNDERSTAND_THIS_IS_REAL_MONEY=true` must both be set, or a `RuntimeError` is raised
 - **Paper Trading** — Binance Testnet integration with slippage modelling
 - **REST API** — FastAPI with 15+ endpoints for portfolio, trades, signals, health, sentiment validation, pause/resume
-- **Next.js Frontend** — dark-terminal themed dashboard with 5 pages: overview, signals, trades, risk, validation; live data via React Query polling; animated charts (Recharts, Framer Motion)
+- **Next.js Frontend** — dark-terminal themed dashboard with 6 pages: overview, wallet, signals, trades, risk, validation; live data via React Query polling (30s stale / 60s refetch); animated charts (Recharts, Framer Motion)
 - **Persistent Storage** — PostgreSQL (Neon.tech) via SQLAlchemy ORM (6 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid` columns on `Trade`
 - **Sentiment Validation** — win-rate color-coded metric, sample-size progress bar, win/loss sentiment comparison chart, statistical readiness gate (requires ≥30 trades)
 - **Decoupled Processes** — `--mode trade` runs scheduler only, `--mode api` runs API server only — separate OS processes sharing the same database; deploy on different machines or hosting platforms
@@ -161,11 +162,12 @@ docker-compose up --build
 ## API Endpoints
 
 | Method | Path | Description |
-|---|---|---|
+|---|---|---|---|
 | `GET` | `/` | Welcome message |
 | `GET` | `/health` | Health check with DB status |
 | `GET` | `/portfolio/history` | Portfolio snapshot history |
 | `GET` | `/portfolio/metrics` | Aggregate performance metrics |
+| `GET` | `/portfolio/wallet` | Wallet view: cash, live holdings with unrealized PnL, closed positions with realized PnL |
 | `GET` | `/portfolio/cycles` | Recent agent cycle runs |
 | `GET` | `/portfolio/positions` | Current open positions |
 | `GET` | `/portfolio/sentiment-validation` | Validate sentiment trading edge (≥30 trades) |
@@ -185,6 +187,7 @@ docker-compose up --build
 | Page | Route | Description |
 |---|---|---|
 | **Overview** | `/` | KPI row (cash, positions, total value, active trades), pipeline stage strip, portfolio area chart, allocation donut, Fear & Greed gauge + countdown timer |
+| **Wallet** | `/wallet` | Cash KPI (CountUp), live holdings grid (7 columns), closed positions table with artifact badge |
 | **Signals** | `/signals` | Bullish/bearish/neutral KPI cards, signals table with sentiment bars and volatility badges, market sentiment indicator |
 | **Trades** | `/trades` | Symbol + status filterable table, KPI row (total trades, win rate, P&L), KPI badges per status badge |
 | **Risk** | `/risk` | VaR progress, concentration, exposure, drawdown cards with tiered colors; drawdown area chart, risk alerts |
@@ -214,6 +217,25 @@ CRUD / Database      → persist everything to PostgreSQL (Neon.tech)
 - **Risk Agent** — 7 independent checks: position size (≤5%), concentration (≤20% per coin), exposure (≤80%), drawdown (>15% halts), duplicate prevention, correlation risk (≥3 same-direction halves, ≥4 rejects), **SELL-without-holding guard** (rejects sell when no position held); trades with `is_auto_exit=True` bypass all checks
 - **Execution Agent** — fetches live price, fetches symbol filters (LOT_SIZE stepSize, MIN_NOTIONAL), rounds quantity **down** to step size (never up, never exceeds), validates notional ≥ MIN_NOTIONAL, returns `REJECTED_LOT_SIZE` status for invalid orders; models random slippage (0–0.15%), calculates `fee_paid = qty × price × TRADING_FEE_PCT`, routes market orders to Binance Testnet
 - **Portfolio Monitor** — two-stage: `check_exit_conditions()` (first) iterates open positions, queries SL/TP from DB, proposes auto-exits; `run()` (last) updates **fee-aware realised P&L** per filled trade, persists positions to DB (`query-then-update-or-insert`), computes total portfolio value and drawdown from peak
+
+---
+
+## Performance
+
+Live paper-trading since June 23, 2026 on Binance Testnet:
+
+| Metric | Value |
+|--------|-------|
+| Initial capital | $10,000 |
+| Current portfolio | ~$12,173 |
+| Gross return | +21.7% |
+| Peak value | $12,239 |
+| Current drawdown | −0.54% from peak |
+| Trades executed | 13 filled |
+| Direction accuracy | ~50% (random — LSTM adds no alpha) |
+| Volatility accuracy | 76–89% (useful for regime awareness) |
+
+> **Honest assessment:** The return tracks the bullish market, not predictive skill. The direction LSTM performs at coin-flip level. The system's real value is its safety net — proper position sizing, stop-loss enforcement, LOT_SIZE validation, auto-exit detection, drawdown circuit breaker, and position reconciliation prevent catastrophic losses while the models improve.
 
 ---
 
@@ -332,6 +354,10 @@ AlphaCore/
 | Phase 10 | Testing (pytest suite for all modules) | ⏳ Pending |
 | Phase 11 | Next.js frontend (TypeScript, shadcn/ui, Recharts, React Query) | ✅ Complete |
 | Phase 12 | Mainnet safety guard, USD cap, alert webhook, LOT_SIZE validation | ✅ Complete |
+| Phase 13 | PnL recording fix (avg_entry lookup at execution time, pre-fix artifact labeling) | ✅ Complete |
+| Phase 14 | Position decrement on SELL fix, wallet endpoint + frontend wallet page | ✅ Complete |
+| Phase 15 | Cycle integrity validation, position reconciliation, auto-pause on drawdown | ✅ Complete |
+| Phase 16 | Cash-from-trades fix (W01/W02), dynamic portfolio value | ✅ Complete |
 
 ---
 

@@ -248,12 +248,33 @@ def _compute_cash_from_trades(initial_capital: Decimal) -> Decimal:
     return initial_capital - total_spent + total_received
 
 
+def get_total_realised_pnl() -> Decimal:
+    """Single source of truth: sum of Trade.pnl for all FILLED SELL trades.
+
+    Returns:
+        Total realised P&L across the entire trade history.
+    """
+    with get_db() as db:
+        result = (
+            db.query(func.sum(Trade.pnl))
+            .filter(
+                Trade.status == "FILLED",
+                Trade.side == "SELL",
+                Trade.pnl.isnot(None),
+            )
+            .scalar()
+        )
+        return Decimal(str(result)) if result is not None else Decimal("0")
+
+
 def get_current_portfolio_state() -> dict[str, Any]:
     """Build a complete portfolio summary from database state and live prices.
 
     Queries the Position table for open positions, fetches live prices,
     retrieves SL/TP from the most recent trade per symbol, and computes
-    total_value, cash, holdings, peak_value, and drawdown_pct.
+    total_value, cash, holdings, peak_value, and drawdown_pct.  Realised
+    P&L is derived fresh from ``Trade.pnl`` every call — no cumulative
+    in-memory tracking.
 
     Returns:
         Dict with keys: total_value, cash, holdings, peak_value, drawdown_pct.
@@ -262,7 +283,7 @@ def get_current_portfolio_state() -> dict[str, Any]:
 
     binance = BinanceClient()
     initial_capital = settings.PORTFOLIO_INITIAL_CAPITAL
-    total_realised_pnl = Decimal("0")
+    total_realised_pnl = get_total_realised_pnl()
 
     with get_db() as db:
         positions = db.query(Position).all()
@@ -320,15 +341,6 @@ def get_current_portfolio_state() -> dict[str, Any]:
 
     cash = _compute_cash_from_trades(initial_capital)
     total_value = cash + total_position_value
-
-    with get_db() as db:
-        latest_snapshot = (
-            db.query(PortfolioSnapshot)
-            .order_by(desc(PortfolioSnapshot.created_at))
-            .first()
-        )
-        if latest_snapshot:
-            total_realised_pnl = Decimal(str(latest_snapshot.realised_pnl)) if latest_snapshot.realised_pnl else Decimal("0")
 
     if total_value > peak_value:
         peak_value = total_value
@@ -556,7 +568,7 @@ def get_performance_metrics() -> dict[str, Any]:
                 metrics["worst_trade"] = min(pnl_list)
                 wins = sum(1 for p in pnl_list if p > 0)
                 metrics["win_rate"] = wins / len(pnl_list)
-                metrics["total_realised_pnl"] = sum(pnl_list)
+                metrics["total_realised_pnl"] = float(get_total_realised_pnl())
 
         latest_dd = (
             db.query(PortfolioSnapshot.drawdown_pct)
@@ -650,6 +662,13 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
     ``created_at`` falls within the window. Computes win/loss statistics
     and compares average sentiment confidence between winners and losers.
 
+    .. note::
+
+        Trades created before ``validation_start_date`` (set in the
+        ``portfolio_state`` singleton table) are excluded — this resets
+        the sample window to count only post-reset trades, without
+        deleting any historical data.
+
     Args:
         days: Lookback window in days (default 30).
 
@@ -662,16 +681,27 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
     import datetime as dt
     from collections import Counter
 
+    from src.database.models import PortfolioState
+
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=days)
 
     with get_db() as db:
+        # Read validation_start_date from the singleton row.
+        pstate = db.query(PortfolioState).filter(PortfolioState.id == "singleton").first()
+        val_start = pstate.validation_start_date if pstate and pstate.validation_start_date else cutoff
+        trade_date_filter = and_(
+            Trade.created_at >= cutoff,
+            Trade.created_at >= val_start,
+        )
+
         # Log breakdown of all sentiment-driven trades by status for auditability.
         all_statuses = (
             db.query(Trade.status)
             .filter(
                 and_(
                     Trade.is_sentiment_driven == True,
-                    Trade.created_at >= cutoff,
+                    Trade.is_pre_fix_artifact == False,
+                    trade_date_filter,
                 )
             )
             .all()
@@ -688,8 +718,9 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
             .filter(
                 and_(
                     Trade.is_sentiment_driven == True,
+                    Trade.is_pre_fix_artifact == False,
                     Trade.status == "FILLED",
-                    Trade.created_at >= cutoff,
+                    trade_date_filter,
                 )
             )
             .all()

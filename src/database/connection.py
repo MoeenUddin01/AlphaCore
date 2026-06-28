@@ -72,6 +72,7 @@ def init_db() -> None:
     tables_after = len(Base.metadata.tables)
 
     _migrate_trades_table(engine)
+    _migrate_portfolio_state_table(engine)
 
     _logger.info(
         "Database ready — %d table(s) registered, %d created",
@@ -102,6 +103,26 @@ def _migrate_trades_table(db_engine: Engine) -> None:
             if col_name not in existing:
                 _logger.warning("Adding missing column '%s' to trades table", col_name)
                 conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col_name} {col_def}"))
+        conn.commit()
+
+
+def _migrate_portfolio_state_table(db_engine: Engine) -> None:
+    """Add missing columns to the ``portfolio_state`` table."""
+    inspector = inspect(db_engine)
+    if not inspector.has_table("portfolio_state"):
+        return
+
+    existing = {col["name"] for col in inspector.get_columns("portfolio_state")}
+
+    _MISSING_COLS: dict[str, str] = {
+        "validation_start_date": "TIMESTAMP",
+    }
+
+    with db_engine.connect() as conn:
+        for col_name, col_def in _MISSING_COLS.items():
+            if col_name not in existing:
+                _logger.warning("Adding missing column '%s' to portfolio_state table", col_name)
+                conn.execute(text(f"ALTER TABLE portfolio_state ADD COLUMN {col_name} {col_def}"))
         conn.commit()
 
 

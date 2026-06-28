@@ -72,9 +72,9 @@ export default function OverviewPage() {
               label="Realised P&L"
               value={metrics?.total_realised_pnl ?? 0}
               format="currency"
-              delta={
-                metrics ? { value: metrics.total_realised_pnl / 100, label: `${metrics.total_trades} trades` } : undefined
-              }
+delta={
+  metrics ? { value: metrics.total_realised_pnl / 10000, label: `${metrics.total_trades} trades` } : undefined
+}
               loading={loading}
             />
             <KpiCard
