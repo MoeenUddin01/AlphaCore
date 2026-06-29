@@ -363,3 +363,14 @@ def resume_trading() -> dict[str, Any]:
     except Exception as exc:
         _logger.exception("POST /portfolio/resume-trading failed")
         raise HTTPException(status_code=500, detail=f"Failed to resume trading: {exc}")
+
+
+@router.get(
+    "/trading-status",
+    summary="Check whether trading is currently paused",
+    description="Returns ``is_paused: bool`` based on the presence of the pause flag file on disk.",
+)
+def trading_status() -> dict[str, Any]:
+    _logger.info("GET /portfolio/trading-status")
+    is_paused = _PAUSE_FLAG.exists()
+    return {"is_paused": is_paused, "status": "paused" if is_paused else "active"}

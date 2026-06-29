@@ -6,6 +6,8 @@ export interface SignalResponse {
   sentiment_score: number;
   sentiment_label: string;
   fear_greed_value: number;
+  has_holding: boolean;
+  distance_to_threshold: number;
   created_at: string;
 }
 
@@ -110,4 +112,9 @@ export interface HealthResponse {
   database: boolean;
   timestamp: string;
   version: string;
+}
+
+export interface TradingStatusResponse {
+  is_paused: boolean;
+  status: string;
 }

@@ -484,7 +484,8 @@ def get_latest_signals() -> list[dict[str, Any]]:
     by ``started_at``.
 
     Returns:
-        List of signal dicts, or an empty list if no cycles exist.
+        List of signal dicts enriched with ``has_holding`` and
+        ``distance_to_threshold``, or an empty list if no cycles exist.
     """
     result: list[dict[str, Any]] = []
     with get_db() as db:
@@ -497,6 +498,11 @@ def get_latest_signals() -> list[dict[str, Any]]:
         if latest is None:
             return result
 
+        # Determine which symbols are currently held
+        held_symbols: set[str] = {
+            p.symbol for p in db.query(Position).all() if p.quantity > 0
+        }
+
         rows = (
             db.query(Signal)
             .filter(Signal.cycle_id == latest)
@@ -504,16 +510,24 @@ def get_latest_signals() -> list[dict[str, Any]]:
             .all()
         )
         for r in rows:
+            sym = r.symbol
+            score = float(r.sentiment_score) if r.sentiment_score else 0.0
+            has_holding = sym in held_symbols
+            threshold = -0.30 if has_holding else 0.30
+            distance_to_threshold = abs(threshold - score)
+
             result.append({
                 "id": r.id,
                 "cycle_id": r.cycle_id,
-                "symbol": r.symbol,
+                "symbol": sym,
                 "predicted_return": float(r.predicted_return) if r.predicted_return else 0.0,
                 "direction": r.direction,
                 "confidence": float(r.confidence) if r.confidence else 0.0,
-                "sentiment_score": float(r.sentiment_score) if r.sentiment_score else 0.0,
+                "sentiment_score": score,
                 "sentiment_label": r.sentiment_label,
                 "fear_greed_value": r.fear_greed_value,
+                "has_holding": has_holding,
+                "distance_to_threshold": round(distance_to_threshold, 4),
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             })
     return result
@@ -548,7 +562,10 @@ def get_performance_metrics() -> dict[str, Any]:
     with get_db() as db:
         filled_count: int = (
             db.query(func.count(Trade.id))
-            .filter(Trade.status == "FILLED")
+            .filter(
+                Trade.status == "FILLED",
+                Trade.is_pre_fix_artifact == False,
+            )
             .scalar()
             or 0
         )
@@ -557,7 +574,11 @@ def get_performance_metrics() -> dict[str, Any]:
         if filled_count > 0:
             pnl_values = (
                 db.query(Trade.pnl)
-                .filter(Trade.status == "FILLED", Trade.pnl.isnot(None))
+                .filter(
+                    Trade.status == "FILLED",
+                    Trade.is_pre_fix_artifact == False,
+                    Trade.pnl.isnot(None),
+                )
                 .all()
             )
             pnl_list = [float(row[0]) for row in pnl_values if row[0] is not None]
@@ -568,7 +589,7 @@ def get_performance_metrics() -> dict[str, Any]:
                 metrics["worst_trade"] = min(pnl_list)
                 wins = sum(1 for p in pnl_list if p > 0)
                 metrics["win_rate"] = wins / len(pnl_list)
-                metrics["total_realised_pnl"] = float(get_total_realised_pnl())
+                metrics["total_realised_pnl"] = sum(pnl_list)
 
         latest_dd = (
             db.query(PortfolioSnapshot.drawdown_pct)

@@ -10,6 +10,7 @@ import PortfolioChart from "@/components/dashboard/PortfolioChart";
 import AllocationDonut from "@/components/dashboard/AllocationDonut";
 import FearGreedGauge from "@/components/dashboard/FearGreedGauge";
 import ValidationBanner from "@/components/dashboard/ValidationBanner";
+import TradeReadiness from "@/components/dashboard/TradeReadiness";
 import FadeIn from "@/components/motion/FadeIn";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -91,6 +92,13 @@ delta={
             />
           </div>
         </FadeIn>
+
+        {/* Trade readiness */}
+        {signals && signals.length > 0 && (
+          <FadeIn delay={0.15}>
+            <TradeReadiness signals={signals} />
+          </FadeIn>
+        )}
 
         {/* Pipeline strip */}
         <FadeIn delay={0.2}>

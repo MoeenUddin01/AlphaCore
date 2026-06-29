@@ -5,6 +5,7 @@ import type {
   SentimentValidationResponse,
   SignalResponse,
   TradeResponse,
+  TradingStatusResponse,
   WalletResponse,
 } from "./types";
 
@@ -90,6 +91,10 @@ const api = {
 
   resumeTrading(): Promise<any> {
     return fetchApi<any>("/portfolio/resume-trading", { method: "POST" });
+  },
+
+  getTradingStatus(): Promise<TradingStatusResponse> {
+    return fetchApi<TradingStatusResponse>("/portfolio/trading-status");
   },
 };
 

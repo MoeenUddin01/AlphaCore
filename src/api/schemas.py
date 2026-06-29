@@ -23,6 +23,8 @@ class SignalResponse(BaseModel):
     sentiment_score: float
     sentiment_label: str
     fear_greed_value: int
+    has_holding: bool = False
+    distance_to_threshold: float = 0.0
     created_at: datetime
 
     model_config: Any = ConfigDict(from_attributes=True)
