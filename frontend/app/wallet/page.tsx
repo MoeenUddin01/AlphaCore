@@ -64,16 +64,17 @@ export default function WalletPage() {
             ) : (
               <>
                 {/* Header row */}
-                <div className="grid grid-cols-5 gap-2 px-4 py-2 text-[11px] uppercase text-zinc-500 tracking-wider border-b border-zinc-800">
+                <div className="grid grid-cols-6 gap-2 px-4 py-2 text-[11px] uppercase text-zinc-500 tracking-wider border-b border-zinc-800">
                   <span>Coin</span>
                   <span>Qty</span>
                   <span>Entry</span>
                   <span>Now</span>
+                  <span>Cost</span>
                   <span>PnL</span>
                 </div>
                 <div className="divide-y divide-zinc-800">
                   {holdings.map((h) => (
-                    <div key={h.symbol} className="grid grid-cols-5 gap-2 px-4 py-3 text-[13px]">
+                    <div key={h.symbol} className="grid grid-cols-6 gap-2 px-4 py-3 text-[13px]">
                       <span className="font-medium text-zinc-200">{h.symbol}</span>
                       <span className="text-zinc-400">
                         <CountUp value={h.quantity} format={(n) => n.toFixed(4)} />
@@ -83,6 +84,9 @@ export default function WalletPage() {
                       </span>
                       <span className="text-zinc-400">
                         <CountUp value={h.current_price} format={formatCurrency} />
+                      </span>
+                      <span className="text-zinc-400">
+                        <CountUp value={h.quantity * h.avg_entry_price} format={formatCurrency} />
                       </span>
                       <span className={h.unrealized_pnl >= 0 ? "text-emerald-500 font-medium" : "text-red-500 font-medium"}>
                         {h.unrealized_pnl >= 0 ? "+" : ""}
