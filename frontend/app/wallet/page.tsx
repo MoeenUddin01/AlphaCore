@@ -62,32 +62,36 @@ export default function WalletPage() {
             ) : holdings.length === 0 ? (
               <p className="text-[13px] text-zinc-500 p-4">No open positions.</p>
             ) : (
-              <div className="divide-y divide-zinc-800">
-                {holdings.map((h) => (
-                  <div key={h.symbol} className="grid grid-cols-7 gap-2 px-4 py-3 text-[13px]">
-                    <span className="font-medium text-zinc-200">{h.symbol}</span>
-                    <span className="text-zinc-400">
-                      <CountUp value={h.quantity} format={(n) => n.toFixed(4)} />
-                    </span>
-                    <span className="text-zinc-400">
-                      <CountUp value={h.avg_entry_price} format={formatCurrency} />
-                    </span>
-                    <span className="text-zinc-400">
-                      <CountUp value={h.current_price} format={formatCurrency} />
-                    </span>
-                    <span className="text-zinc-200 font-medium">
-                      <CountUp value={h.current_value} format={formatCurrency} />
-                    </span>
-                    <span className={h.unrealized_pnl >= 0 ? "text-emerald-500" : "text-red-500"}>
-                      <CountUp value={h.unrealized_pnl} format={formatCurrency} />
-                    </span>
-                    <span className={h.unrealized_pnl >= 0 ? "text-emerald-500" : "text-red-500"}>
-                      {h.unrealized_pnl_pct >= 0 ? "+" : ""}
-                      <CountUp value={h.unrealized_pnl_pct} format={(n) => n.toFixed(2) + "%"} />
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <>
+                {/* Header row */}
+                <div className="grid grid-cols-5 gap-2 px-4 py-2 text-[11px] uppercase text-zinc-500 tracking-wider border-b border-zinc-800">
+                  <span>Coin</span>
+                  <span>Qty</span>
+                  <span>Entry</span>
+                  <span>Now</span>
+                  <span>PnL</span>
+                </div>
+                <div className="divide-y divide-zinc-800">
+                  {holdings.map((h) => (
+                    <div key={h.symbol} className="grid grid-cols-5 gap-2 px-4 py-3 text-[13px]">
+                      <span className="font-medium text-zinc-200">{h.symbol}</span>
+                      <span className="text-zinc-400">
+                        <CountUp value={h.quantity} format={(n) => n.toFixed(4)} />
+                      </span>
+                      <span className="text-zinc-400">
+                        <CountUp value={h.avg_entry_price} format={formatCurrency} />
+                      </span>
+                      <span className="text-zinc-400">
+                        <CountUp value={h.current_price} format={formatCurrency} />
+                      </span>
+                      <span className={h.unrealized_pnl >= 0 ? "text-emerald-500 font-medium" : "text-red-500 font-medium"}>
+                        {h.unrealized_pnl >= 0 ? "+" : ""}
+                        <CountUp value={h.unrealized_pnl} format={formatCurrency} />
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         </FadeIn>
