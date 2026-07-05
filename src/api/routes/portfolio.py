@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import desc
 
 from src.api.schemas import (
@@ -30,6 +31,7 @@ from src.database.crud import (
 )
 from src.database.models import CycleRun, Position, Trade
 from src.utils.config import settings
+from src.utils.helpers import format_pair_for_binance, send_alert
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -244,6 +246,13 @@ def wallet() -> WalletResponse:
                         buys_for_sym.pop(0)
 
                 if not buy_prices:
+                    # Intentional skip — this SELL closed a position whose cost basis
+                    # predates the tracking system (e.g. trade 10, the post-fix BTC
+                    # SELL that was acquired before W08 was deployed).  The wallet is
+                    # scoped to matched closed positions only; for a portfolio-wide
+                    # total that includes every fill regardless of BUY history, use
+                    # get_total_realised_pnl() in crud.py (which sums Trade.pnl
+                    # across ALL FILLED SELLs, including unmatched ones).
                     _logger.warning("No matching BUY found for SELL %s qty=%s", sym, qty)
                     continue
 
@@ -374,3 +383,141 @@ def trading_status() -> dict[str, Any]:
     _logger.info("GET /portfolio/trading-status")
     is_paused = _PAUSE_FLAG.exists()
     return {"is_paused": is_paused, "status": "paused" if is_paused else "active"}
+
+
+class ManualSellRequest(BaseModel):
+    """Request body for manually selling a position."""
+
+    symbol: str
+    quantity: float | None = None
+
+
+@router.post(
+    "/sell",
+    summary="Manually sell a position",
+    description="Execute a market SELL on Binance Testnet for the given symbol. "
+    "If quantity is omitted, the full position is sold. Logs the trade and "
+    "updates the Position table. Does not interfere with the automated scheduler.",
+)
+def manual_sell(req: ManualSellRequest) -> dict[str, Any]:
+    _logger.info("POST /portfolio/sell — symbol=%s, quantity=%s", req.symbol, req.quantity)
+    try:
+        from binance.exceptions import BinanceAPIException
+
+        binance = BinanceClient()
+        sym_clean = format_pair_for_binance(req.symbol)
+
+        with get_db() as db:
+            pos = db.query(Position).filter(Position.symbol == req.symbol).first()
+            if not pos or pos.quantity <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No open position for {req.symbol}",
+                )
+
+            sell_qty = Decimal(str(req.quantity)) if req.quantity else Decimal(str(pos.quantity))
+
+            if sell_qty > Decimal(str(pos.quantity)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Requested qty {sell_qty} exceeds held qty {pos.quantity}",
+                )
+
+            # Apply LOT_SIZE rounding
+            filters = binance.get_symbol_filters(req.symbol)
+            step_size = filters.get("lot_size", {}).get("stepSize")
+            if step_size and step_size > Decimal("0"):
+                sell_qty = (sell_qty // step_size) * step_size
+
+            if sell_qty <= Decimal("0"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Quantity too small after LOT_SIZE rounding for {req.symbol}",
+                )
+
+            avg_entry = Decimal(str(pos.avg_entry_price)) if pos.avg_entry_price else Decimal("0")
+
+        # Place market SELL on Binance
+        try:
+            order = binance._client.create_order(
+                symbol=sym_clean,
+                side="SELL",
+                type="MARKET",
+                quantity=float(sell_qty),
+            )
+            order_id = order.get("orderId", "unknown")
+            executed_qty = Decimal(str(order.get("executedQty", sell_qty)))
+            cum_quote = Decimal(str(order.get("cummulativeQuoteQty", "0")))
+            if executed_qty > Decimal("0"):
+                actual_fill = (cum_quote / executed_qty).quantize(Decimal("0.01"))
+            else:
+                actual_fill = binance.get_current_price(req.symbol)
+        except BinanceAPIException as exc:
+            _logger.error("Binance API error on manual SELL %s: %s", sym_clean, exc)
+            raise HTTPException(status_code=500, detail=f"Binance order failed: {exc}")
+        except Exception as exc:
+            _logger.error("Unexpected error on manual SELL %s: %s", sym_clean, exc)
+            raise HTTPException(status_code=500, detail=f"Order failed: {exc}")
+
+        # Compute PnL
+        fee_amount = executed_qty * actual_fill * Decimal(str(settings.TRADING_FEE_PCT))
+        pnl = None
+        if avg_entry > 0 and executed_qty > 0:
+            pnl = (actual_fill - avg_entry) * executed_qty - fee_amount
+
+        # Record trade in DB
+        import uuid
+
+        trade_id = str(uuid.uuid4())
+        with get_db() as db:
+            trade = Trade(
+                id=trade_id,
+                cycle_id="manual",
+                symbol=req.symbol,
+                side="SELL",
+                proposed_quantity=float(sell_qty),
+                executed_quantity=float(executed_qty),
+                entry_price=float(avg_entry),
+                executed_price=float(actual_fill),
+                stop_loss_price=0,
+                take_profit_price=0,
+                order_id=str(order_id),
+                status="FILLED",
+                reasoning=f"Manual SELL from wallet — user-initiated",
+                pnl=float(pnl) if pnl is not None else None,
+            )
+            db.add(trade)
+
+            # Update position
+            pos = db.query(Position).filter(Position.symbol == req.symbol).first()
+            if pos:
+                remaining = Decimal(str(pos.quantity)) - executed_qty
+                if remaining <= Decimal("0"):
+                    db.delete(pos)
+                else:
+                    pos.quantity = remaining
+                    pos.current_price = float(actual_fill)
+            db.commit()
+
+        _logger.info(
+            "Manual SELL filled: %s %s @ %s (pnl=%s, id=%s)",
+            executed_qty, sym_clean, actual_fill, pnl, trade_id,
+        )
+        send_alert(
+            f"Manual SELL: {executed_qty} {req.symbol} @ ${actual_fill} | PnL: ${pnl}",
+            level="info",
+        )
+
+        return {
+            "status": "filled",
+            "symbol": req.symbol,
+            "quantity": float(executed_qty),
+            "fill_price": float(actual_fill),
+            "pnl": float(pnl) if pnl is not None else None,
+            "order_id": str(order_id),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _logger.exception("POST /portfolio/sell failed")
+        raise HTTPException(status_code=500, detail=f"Manual sell failed: {exc}")

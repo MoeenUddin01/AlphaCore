@@ -96,6 +96,14 @@ const api = {
   getTradingStatus(): Promise<TradingStatusResponse> {
     return fetchApi<TradingStatusResponse>("/portfolio/trading-status");
   },
+
+  sellPosition(symbol: string, quantity?: number): Promise<any> {
+    return fetchApi<any>("/portfolio/sell", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol, quantity: quantity ?? null }),
+    });
+  },
 };
 
 export default api;

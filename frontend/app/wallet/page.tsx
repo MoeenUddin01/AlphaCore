@@ -1,16 +1,37 @@
 "use client";
 
+import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "@/lib/hooks/usePortfolio";
+import api from "@/lib/api";
 import PageShell from "@/components/layout/PageShell";
-import KpiCard from "@/components/dashboard/KpiCard";
 import FadeIn from "@/components/motion/FadeIn";
 import CountUp from "@/components/motion/CountUp";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { formatCurrency, formatPercent, timeAgo } from "@/lib/utils";
+import { formatCurrency, timeAgo } from "@/lib/utils";
 
 export default function WalletPage() {
   const { data: wallet, isLoading, error } = useWallet();
+  const queryClient = useQueryClient();
+  const [selling, setSelling] = useState<string | null>(null);
+  const [sellResult, setSellResult] = useState<{ symbol: string; pnl: number | null; price: number } | null>(null);
+
+  const handleSell = async (symbol: string, quantity: number) => {
+    if (!confirm(`Sell ALL ${symbol}? This will place a market order on Binance Testnet.`)) return;
+    setSelling(symbol);
+    setSellResult(null);
+    try {
+      const result = await api.sellPosition(symbol, quantity);
+      setSellResult({ symbol, pnl: result.pnl, price: result.fill_price });
+      queryClient.invalidateQueries({ queryKey: ["wallet"] });
+      queryClient.invalidateQueries({ queryKey: ["positions"] });
+    } catch (e: any) {
+      alert(`Sell failed: ${e.message}`);
+    } finally {
+      setSelling(null);
+    }
+  };
 
   if (error) {
     return (
@@ -55,6 +76,21 @@ export default function WalletPage() {
                 Holdings ({holdings.length})
               </p>
             </div>
+
+            {sellResult && (
+              <div className="mx-4 mt-3 rounded border border-emerald-800 bg-emerald-950/50 px-4 py-3 text-[13px]">
+                <span className="text-emerald-400 font-medium">Sold {sellResult.symbol}</span>
+                <span className="text-zinc-400"> @ </span>
+                <CountUp value={sellResult.price} format={formatCurrency} />
+                {sellResult.pnl !== null && (
+                  <span className={sellResult.pnl >= 0 ? "text-emerald-400 ml-2" : "text-red-400 ml-2"}>
+                    {sellResult.pnl >= 0 ? "+" : ""}
+                    <CountUp value={sellResult.pnl} format={formatCurrency} />
+                  </span>
+                )}
+              </div>
+            )}
+
             {isLoading ? (
               <div className="space-y-2 p-4">
                 <Skeleton className="h-10 bg-zinc-800" />
@@ -64,17 +100,18 @@ export default function WalletPage() {
             ) : (
               <>
                 {/* Header row */}
-                <div className="grid grid-cols-6 gap-2 px-4 py-2 text-[11px] uppercase text-zinc-500 tracking-wider border-b border-zinc-800">
+                <div className="grid grid-cols-7 gap-2 px-4 py-2 text-[11px] uppercase text-zinc-500 tracking-wider border-b border-zinc-800">
                   <span>Coin</span>
                   <span>Qty</span>
                   <span>Entry</span>
                   <span>Now</span>
                   <span>Cost</span>
                   <span>PnL</span>
+                  <span></span>
                 </div>
                 <div className="divide-y divide-zinc-800">
                   {holdings.map((h) => (
-                    <div key={h.symbol} className="grid grid-cols-6 gap-2 px-4 py-3 text-[13px]">
+                    <div key={h.symbol} className="grid grid-cols-7 gap-2 px-4 py-3 text-[13px] items-center">
                       <span className="font-medium text-zinc-200">{h.symbol}</span>
                       <span className="text-zinc-400">
                         <CountUp value={h.quantity} format={(n) => n.toFixed(4)} />
@@ -92,6 +129,13 @@ export default function WalletPage() {
                         {h.unrealized_pnl >= 0 ? "+" : ""}
                         <CountUp value={h.unrealized_pnl} format={formatCurrency} />
                       </span>
+                      <button
+                        onClick={() => handleSell(h.symbol, h.quantity)}
+                        disabled={selling === h.symbol}
+                        className="px-3 py-1.5 text-[12px] font-medium rounded bg-red-600/20 text-red-400 border border-red-600/30 hover:bg-red-600/40 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {selling === h.symbol ? "Selling..." : "SELL"}
+                      </button>
                     </div>
                   ))}
                 </div>
