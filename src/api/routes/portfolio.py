@@ -470,9 +470,13 @@ def manual_sell(req: ManualSellRequest) -> dict[str, Any]:
 
         trade_id = str(uuid.uuid4())
         with get_db() as db:
+            # Use the latest cycle_id so the FK constraint is satisfied
+            latest_cycle = db.query(CycleRun).order_by(desc(CycleRun.started_at)).first()
+            cycle_id = latest_cycle.cycle_id if latest_cycle else "unknown"
+
             trade = Trade(
                 id=trade_id,
-                cycle_id="manual",
+                cycle_id=cycle_id,
                 symbol=req.symbol,
                 side="SELL",
                 proposed_quantity=float(sell_qty),
