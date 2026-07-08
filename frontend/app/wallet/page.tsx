@@ -68,8 +68,89 @@ export default function WalletPage() {
           </div>
         </FadeIn>
 
+        {/* Stop Loss / Take Profit levels */}
+        <FadeIn delay={0.08}>
+          <div className="rounded-md border border-zinc-800 bg-zinc-900">
+            <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+              <p className="text-[13px] font-medium text-zinc-200">
+                Exit Levels
+              </p>
+              <p className="text-[11px] text-zinc-500">
+                SL -3% · TP +6%
+              </p>
+            </div>
+
+            {isLoading ? (
+              <div className="space-y-2 p-4">
+                <Skeleton className="h-10 bg-zinc-800" />
+              </div>
+            ) : holdings.length === 0 ? (
+              <p className="text-[13px] text-zinc-500 p-4">No positions to track.</p>
+            ) : (
+              <>
+                {/* Header row */}
+                <div className="grid grid-cols-6 gap-2 px-4 py-2 text-[11px] uppercase text-zinc-500 tracking-wider border-b border-zinc-800">
+                  <span>Coin</span>
+                  <span>Entry</span>
+                  <span>Now</span>
+                  <span>Stop Loss</span>
+                  <span>Take Profit</span>
+                  <span className="text-right">Status</span>
+                </div>
+                <div className="divide-y divide-zinc-800">
+                  {holdings.map((h) => {
+                    const SL_PCT = 0.03;
+                    const TP_PCT = 0.06;
+                    const sl = h.avg_entry_price * (1 - SL_PCT);
+                    const tp = h.avg_entry_price * (1 + TP_PCT);
+                    const slDist = ((h.current_price - sl) / h.current_price) * 100;
+                    const tpDist = ((tp - h.current_price) / h.current_price) * 100;
+
+                    let statusLabel: string;
+                    let statusColor: string;
+                    if (slDist < 0) {
+                      statusLabel = "SL HIT";
+                      statusColor = "text-red-400 bg-red-950/50 border-red-800";
+                    } else if (tpDist < 0) {
+                      statusLabel = "TP HIT";
+                      statusColor = "text-emerald-400 bg-emerald-950/50 border-emerald-800";
+                    } else if (slDist < tpDist) {
+                      statusLabel = `${slDist.toFixed(1)}% to SL`;
+                      statusColor = "text-amber-400";
+                    } else {
+                      statusLabel = `${tpDist.toFixed(1)}% to TP`;
+                      statusColor = "text-emerald-400";
+                    }
+
+                    return (
+                      <div key={h.symbol} className="grid grid-cols-6 gap-2 px-4 py-3 text-[13px] items-center">
+                        <span className="font-medium text-zinc-200">{h.symbol}</span>
+                        <span className="text-zinc-400">
+                          <CountUp value={h.avg_entry_price} format={formatCurrency} />
+                        </span>
+                        <span className="text-zinc-400">
+                          <CountUp value={h.current_price} format={formatCurrency} />
+                        </span>
+                        <span className="text-red-400 font-mono">
+                          <CountUp value={sl} format={formatCurrency} />
+                        </span>
+                        <span className="text-emerald-400 font-mono">
+                          <CountUp value={tp} format={formatCurrency} />
+                        </span>
+                        <span className={`text-right text-[12px] font-medium ${statusColor}`}>
+                          {statusLabel}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </FadeIn>
+
         {/* Holdings section */}
-        <FadeIn delay={0.1}>
+        <FadeIn delay={0.15}>
           <div className="rounded-md border border-zinc-800 bg-zinc-900">
             <div className="px-4 py-3 border-b border-zinc-800">
               <p className="text-[13px] font-medium text-zinc-200">
