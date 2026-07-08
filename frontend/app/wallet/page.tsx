@@ -106,20 +106,24 @@ export default function WalletPage() {
                     const slDist = ((h.current_price - sl) / h.current_price) * 100;
                     const tpDist = ((tp - h.current_price) / h.current_price) * 100;
 
-                    let statusLabel: string;
-                    let statusColor: string;
+                    let slLabel: string;
+                    let slColor: string;
                     if (slDist < 0) {
-                      statusLabel = "SL HIT";
-                      statusColor = "text-red-400 bg-red-950/50 border-red-800";
-                    } else if (tpDist < 0) {
-                      statusLabel = "TP HIT";
-                      statusColor = "text-emerald-400 bg-emerald-950/50 border-emerald-800";
-                    } else if (slDist < tpDist) {
-                      statusLabel = `${slDist.toFixed(1)}% to SL`;
-                      statusColor = "text-amber-400";
+                      slLabel = "SL HIT";
+                      slColor = "text-red-400";
                     } else {
-                      statusLabel = `${tpDist.toFixed(1)}% to TP`;
-                      statusColor = "text-emerald-400";
+                      slLabel = `${slDist.toFixed(1)}%`;
+                      slColor = slDist < 2 ? "text-red-400" : slDist < 5 ? "text-amber-400" : "text-zinc-400";
+                    }
+
+                    let tpLabel: string;
+                    let tpColor: string;
+                    if (tpDist < 0) {
+                      tpLabel = "TP HIT";
+                      tpColor = "text-emerald-400";
+                    } else {
+                      tpLabel = `${tpDist.toFixed(1)}%`;
+                      tpColor = tpDist < 2 ? "text-emerald-400" : tpDist < 5 ? "text-emerald-400/70" : "text-zinc-500";
                     }
 
                     return (
@@ -137,8 +141,9 @@ export default function WalletPage() {
                         <span className="text-emerald-400 font-mono">
                           <CountUp value={tp} format={formatCurrency} />
                         </span>
-                        <span className={`text-right text-[12px] font-medium ${statusColor}`}>
-                          {statusLabel}
+                        <span className="text-right text-[12px] font-medium flex flex-col items-end gap-0.5">
+                          <span className={slColor}>↓ {slLabel}</span>
+                          <span className={tpColor}>↑ {tpLabel}</span>
                         </span>
                       </div>
                     );
