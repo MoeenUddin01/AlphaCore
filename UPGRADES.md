@@ -358,43 +358,100 @@ These directly impact whether the system makes money.
 
 ## Summary — Priority Matrix
 
-| Priority | ID | Description | Effort | Impact |
-|----------|----|-------------|--------|--------|
-| CRITICAL | U01 | Fix Direction LSTM | High | Core alpha |
-| CRITICAL | U02 | Profit-taking strategy | Medium | Returns |
-| CRITICAL | U03 | Position cooldown | Low | Risk mgmt |
-| CRITICAL | U04 | Sentiment improvement | Medium | Signal quality |
-| HIGH | U05 | Real VaR model | Medium | Risk mgmt |
-| HIGH | U06 | API authentication | Low | Security |
-| HIGH | U07 | Daily loss limit | Low | Risk mgmt |
-| HIGH | U08 | Correlation guard | Medium | Diversification |
-| HIGH | U09 | Expand news sources | Low | Data quality |
-| HIGH | U10 | Fix keyword matching | Low | Data quality |
-| HIGH | U11 | On-chain data | Medium | Features |
-| HIGH | U12 | Order book depth | Medium | Execution |
-| MEDIUM | U13 | KPI polish | Low | UX |
-| MEDIUM | U14 | WebSocket prices | Medium | Real-time |
-| MEDIUM | U15 | Trade filters | Low | UX |
-| MEDIUM | U16 | Risk dashboard | Medium | UX |
-| MEDIUM | U17 | Mobile responsive | Medium | UX |
-| MEDIUM | U18 | Fix utcnow() | Low | Code quality |
-| MEDIUM | U19 | Remove dead code | Low | Cleanup |
-| MEDIUM | U20 | API pagination | Low | Performance |
-| MEDIUM | U21 | Database indexes | Low | Performance |
-| MEDIUM | U22 | Graceful shutdown | Low | Reliability |
-| LOW | U23 | Docker setup | Medium | Deployment |
-| LOW | U24 | Auto-start | Low | Ops |
-| LOW | U25 | Log rotation | Low | Ops |
-| LOW | U26 | Monitoring | Medium | Observability |
-| LOW | U27 | Type hints | Low | Code quality |
-| LOW | U28 | Docstrings | Low | Documentation |
-| LOW | U29 | Unit tests | High | Quality |
-| LOW | U30 | Ruff linting | Low | Code quality |
-| LOW | U31 | Security audit | Low | Security |
+| Priority | ID | Description | Effort | Impact | Evidence |
+|----------|----|-------------|--------|--------|----------|
+| CRITICAL | U01 | Fix Direction LSTM | High | Core alpha | 50% confidence = random |
+| CRITICAL | F01 | Sentiment not predictive | Medium | Signal quality | Winners/losers same score |
+| CRITICAL | F02 | Stop loss too tight | Low | Risk mgmt | Selling at the bottom |
+| CRITICAL | U02 | Profit-taking strategy | Medium | Returns | 1:1 risk/reward |
+| CRITICAL | U03 | Position cooldown | Low | Risk mgmt | Quick trades lose |
+| HIGH | F03 | Quick trades lose | Low | Strategy | <2h trades all lose |
+| HIGH | F04 | Risk/reward 1:1 | Medium | Returns | Thin profits |
+| HIGH | U04 | Sentiment improvement | Medium | Signal quality | 23.5% validation win rate |
+| HIGH | U05 | Real VaR model | Medium | Risk mgmt | Hardcoded 2% |
+| HIGH | U06 | API authentication | Low | Security | Wide open |
+| HIGH | U07 | Daily loss limit | Low | Risk mgmt | No daily cap |
+| HIGH | U08 | Correlation guard | Medium | Diversification | Basic check |
+| HIGH | U09 | Expand news sources | Low | Data quality | 25 → 233 articles |
+| HIGH | U10 | Fix keyword matching | Low | Data quality | False positives |
+| HIGH | U11 | On-chain data | Medium | Features | CoinGecko barely used |
+| HIGH | U12 | Order book depth | Medium | Execution | No liquidity info |
+| MEDIUM | F05 | Long holds better | Low | Strategy | >48h = 62.5% win rate |
+| MEDIUM | U13 | KPI polish | Low | UX | Plain cards |
+| MEDIUM | U14 | WebSocket prices | Medium | Real-time | 30s polling |
+| MEDIUM | U15 | Trade filters | Low | UX | No filters |
+| MEDIUM | U16 | Risk dashboard | Medium | UX | Minimal |
+| MEDIUM | U17 | Mobile responsive | Medium | UX | Desktop only |
+| MEDIUM | U18 | Fix utcnow() | Low | Code quality | 17 occurrences |
+| MEDIUM | U19 | Remove dead code | Low | Cleanup | 3 dead files |
+| MEDIUM | U20 | API pagination | Low | Performance | No pagination |
+| MEDIUM | U21 | Database indexes | Low | Performance | No indexes |
+| MEDIUM | U22 | Graceful shutdown | Low | Reliability | Hard kill |
+| LOW | U23 | Docker setup | Medium | Deployment | Empty files |
+| LOW | U24 | Auto-start | Low | Ops | Done (crontab) |
+| LOW | U25 | Log rotation | Low | Ops | No retention |
+| LOW | U26 | Monitoring | Medium | Observability | Only webhook |
+| LOW | U27 | Type hints | Low | Code quality | Not enforced |
+| LOW | U28 | Docstrings | Low | Documentation | Incomplete |
+| LOW | U29 | Unit tests | High | Quality | 4 empty dirs |
+| LOW | U30 | Ruff linting | Low | Code quality | Not configured |
+| LOW | U31 | Security audit | Low | Security | No scanning |
 
 ---
 
-## 8. Daily Report
+## 8. Testing Phase Observations (17 Trades)
+
+> Added: 2026-07-11 after analyzing 17 completed trades
+
+### Critical Findings
+
+#### F01 — Sentiment Score Is NOT Predictive
+- **Evidence:** Winners avg sentiment = +0.49, Losers avg sentiment = +0.51
+- **Impact:** Sentiment-based BUY/SELL decisions are essentially random
+- **Root cause:** FinBERT only sees 25 CoinDesk articles, most neutral
+- **Fix:** U09 (expand news sources) + U04 (sentiment improvement)
+
+#### F02 — Stop Loss Too Tight (-3%)
+- **Evidence:** SOL stop loss triggered 2 times, BTC once — system sells at the bottom
+- **Impact:** -3% SL causes $-10.49 loss on SOL (biggest single loss)
+- **Fix:** U02 (profit-taking strategy) — consider wider SL (-5%) or trailing stop
+
+#### F03 — Quick Trades Lose Money
+- **Evidence:** Trades held <2 hours: 0 wins, 1 loss
+- **Impact:** System enters and exits too fast — no time for price to move
+- **Fix:** U03 (position cooldown) — minimum hold time before selling
+
+#### F04 — Risk/Reward Ratio Is 1:1
+- **Evidence:** Average win = +$5.36, Average loss = -$5.26
+- **Impact:** Even with 53.8% win rate, profits are thin
+- **Fix:** U02 (profit-taking) — let winners run, cut losers faster
+
+#### F05 — Long Holds Perform Better
+- **Evidence:** Trades held >48h: 5W/3L (62.5% win rate)
+- **Impact:** System should hold positions longer
+- **Fix:** U02 (trailing stop loss) + U03 (minimum hold time)
+
+### Priority Updates Based on Findings
+
+| Priority | ID | Description | Evidence |
+|----------|----|-------------|----------|
+| CRITICAL | F01 | Sentiment not predictive | Winners/losers same score |
+| CRITICAL | F02 | Stop loss too tight | Selling at the bottom |
+| HIGH | F03 | Quick trades lose | <2h trades all lose |
+| HIGH | F04 | Risk/reward 1:1 | Thin profits |
+| MEDIUM | F05 | Long holds better | >48h = 62.5% win rate |
+
+### Recommended Action Order (Post-30 Trades)
+
+1. **U09** — Expand news sources (fixes F01)
+2. **U02** — Profit-taking strategy (fixes F02, F04, F05)
+3. **U03** — Position cooldown (fixes F03)
+4. **U04** — Sentiment improvement (fixes F01)
+5. **U07** — Daily loss limit (safety net)
+
+---
+
+## 9. Daily Report
 
 > Append daily status updates below this line after each trading day.
 
