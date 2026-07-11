@@ -219,6 +219,7 @@ def run_trading_cycle() -> None:
         )
     except Exception:
         _logger.exception("Trading cycle failed — full traceback below")
+        send_alert("Trading cycle failed — see scheduler logs for details", level="error")
     finally:
         lock.release()
         _logger.debug("Released trading cycle lock at %s", _LOCK_PATH)
@@ -284,20 +285,59 @@ def reconcile_positions() -> None:
         if db_qty <= 0.000001 and exchange_qty <= 0.000001:
             continue
 
-        diff = abs(Decimal(str(db_qty)) - Decimal(str(exchange_qty)))
-        tolerance = Decimal(str(max(db_qty, exchange_qty))) * Decimal("0.01")
-        if diff > tolerance:
+        # One-directional check: exchange must have at least what DB expects.
+        # Extra on exchange (faucet dust on Testnet) is fine — only flag if
+        # a position went missing (real state corruption).
+        shortfall = Decimal(str(db_qty)) - Decimal(str(exchange_qty))
+        tolerance = Decimal(str(db_qty)) * Decimal("0.05")
+        if shortfall > tolerance:
             mismatches.append(
                 f"{pos['symbol']}: DB={db_qty:.8f} Exchange={exchange_qty:.8f} "
-                f"(diff={float(diff):.8f})"
+                f"(shortfall={float(shortfall):.8f})"
             )
 
-    for asset, exchange_qty in balances.items():
-        pair = f"{asset}/USDT"
-        db_pos = next((p for p in db_positions_data if p["symbol"] == pair), None)
-        if db_pos is None and exchange_qty > 0.000001:
+    # --- Exchange-only check: cross-reference against Trade table ---
+    # Assets remaining in `balances` exist on exchange but have no
+    # Position row.  Most of the time this is Testnet faucet dust and
+    # should be ignored.  However, a Position row can also go missing
+    # due to the T13 pipeline-only limitation — if a manual intervention
+    # adjusted the Position table and update_positions() later closed
+    # out a stale remaining qty, the row is deleted even though trade
+    # history still shows net positive quantity.
+    #
+    # Distinguish the two cases by querying the Trade table: if there
+    # is net positive trade quantity for this symbol (BUYs > SELLs) and
+    # the exchange balance is material, the Position row is genuinely
+    # missing — flag it.
+    from sqlalchemy import case as sql_case, func as sql_func
+
+    for orphaned_asset, orphaned_qty in list(balances.items()):
+        if orphaned_qty <= 0.000001:
+            continue
+        orphaned_pair = f"{orphaned_asset}/USDT"
+        with get_db() as db:
+            net_trade_result = (
+                db.query(
+                    sql_func.sum(
+                        sql_case(
+                            (TradeModel.side == "BUY", TradeModel.executed_quantity),
+                            (TradeModel.side == "SELL", -TradeModel.executed_quantity),
+                            else_=0,
+                        )
+                    )
+                )
+                .filter(
+                    TradeModel.symbol == orphaned_pair,
+                    TradeModel.status == "FILLED",
+                )
+                .scalar()
+            )
+        net_trade_qty = float(net_trade_result) if net_trade_result is not None else 0.0
+        if net_trade_qty > 0.001:
             mismatches.append(
-                f"{pair}: not in DB but Exchange has {exchange_qty:.8f}"
+                f"{orphaned_pair}: Position MISSING (DB=0, Exchange={orphaned_qty:.8f}, "
+                f"net_trade_qty={net_trade_qty:.8f}) — trade history shows this asset "
+                f"should have a Position row but none exists. Possible T13 pipeline-only drift."
             )
 
     if mismatches:

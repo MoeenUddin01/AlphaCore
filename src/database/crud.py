@@ -249,10 +249,43 @@ def _compute_cash_from_trades(initial_capital: Decimal) -> Decimal:
 
 
 def get_total_realised_pnl() -> Decimal:
-    """Single source of truth: sum of Trade.pnl for all FILLED SELL trades.
+    """Sum of Trade.pnl for every FILLED SELL — the portfolio-wide ledger.
+
+    .. important::
+
+       **Artifact-inclusion is deliberate.**  This function does *not*
+       filter ``is_pre_fix_artifact``.  It was built as the single source
+       of truth for portfolio-wide realised P&L — the ledger that answers
+       "what actually happened to this portfolio's cash balance?"  Every
+       fill that touched the exchange, including pre-fix trades with zero
+       PnL (W07 artifacts), contributed to the real cash flow and must be
+       counted here so that ``SUM(Trade.pnl)`` always agrees with
+       ``PortfolioSnapshot.realised_pnl`` (see T01 check #6).  Two ledgers
+       disagreeing was the original R08 bug; this function exists to
+       prevent that class of bug from recurring.
+
+    .. note::
+
+       **Contrast with scoped consumers that exclude artifacts:**
+
+       - :func:`get_performance_metrics` — filters ``is_pre_fix_artifact``
+         because it answers "how well does the current strategy perform on
+         trustworthy data?"  Including zero-PnL artifact SELLs would drag
+         win rate and average PnL down, creating a misleading impression
+         of strategy performance.
+       - :func:`get_sentiment_trade_performance` — also filters artifacts,
+         and further filters by ``validation_start_date``, because it
+         answers "are recent sentiment-driven trades generating alpha?"
+         Pre-fix noise would poison that statistical signal.
+
+       All three functions are correct within their scope.  The portfolio-
+       wide counter (this function) must include everything.  The strategy-
+       evaluation counters must exclude noise.  The distinction is
+       intentional, not an inconsistency.
 
     Returns:
-        Total realised P&L across the entire trade history.
+        Total realised P&L across the entire trade history (including
+        pre-fix artifact trades).
     """
     with get_db() as db:
         result = (
