@@ -105,12 +105,20 @@ These directly impact whether the system makes money.
 
 ### U09 — Expand News Sources
 - **File:** `src/data/rss_news_client.py`
-- **Issue:** Only CoinDesk RSS. Returns 0-2 articles per cycle. Most sentiment scores are 0.0 (neutral).
+- **Issue:** Only CoinDesk RSS (25 articles). Returns 0-2 articles per cycle for most coins. SOL has 0 coverage. Most sentiment scores are 0.0 (neutral).
+- **Verified free RSS feeds (no API key):**
+  - CoinDesk (current): `https://www.coindesk.com/arc/outboundfeeds/rss/` — 25 articles
+  - **U.Today:** `https://u.today/rss` — 93 articles (BTC:34, ETH:14, SOL:4, BNB:3, ADA:4)
+  - **Crypto.News:** `https://crypto.news/feed/` — 50 articles (BTC:11, ETH:8, SOL:5, BNB:1, ADA:1)
+  - **Decrypt:** `https://decrypt.co/feed` — 35 articles (BTC:6, ETH:3, SOL:2, BNB:2)
+  - **CoinTelegraph:** `https://cointelegraph.com/rss` — 30 articles (BTC:11, ETH:4, SOL:1)
+  - ~~The Block: `https://www.theblock.co/rss.xml` — 0 articles (feed broken)~~
+  - ~~Bitcoin Magazine: `https://bitcoinmagazine.com/feed` — BTC only, no alts~~
+- **Impact:** Adding 4 feeds = 233 total articles vs 25 now (9x increase)
+  - BTC: 8 → 72 matches, ETH: 1 → 27, SOL: 0 → 12, BNB: 2 → 8, ADA: 1 → 6
 - **Fix needed:**
-  - Add CoinTelegraph RSS: `https://cointelegraph.com/rss`
-  - Add The Block RSS: `https://www.theblock.co/rss.xml`
-  - Add Decrypt RSS: `https://decrypt.co/feed`
-  - Deduplicate across sources
+  - Add all 4 working RSS feeds to `RSS_FEEDS` dict in `rss_news_client.py`
+  - Deduplicate across sources (same article appears on multiple sites)
   - Increase per-symbol keyword matching (currently exact match)
 
 ### U10 — Fix CoinDesk RSS Keyword Matching
