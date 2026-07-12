@@ -242,6 +242,23 @@ def wallet() -> WalletResponse:
                 buy_prices: list[tuple[Decimal, Decimal, datetime, bool]] = []
                 buys_for_sym = buy_queue.get(sym, [])
 
+                # Strip dust residuals from the front of the queue before
+                # matching.  These are tiny amounts left over from previous
+                # partial SELLs (e.g. 0.00001 BTC).  Without this cleanup,
+                # a large SELL would match against dust first, producing a
+                # nonsensical weighted buy price that the sanity check then
+                # rejects — losing the SELL from closed_positions entirely.
+                while buys_for_sym:
+                    dust_usd = buys_for_sym[0]["remaining"] * buys_for_sym[0]["price"]
+                    if dust_usd < Decimal("1"):
+                        _logger.debug(
+                            "Stripping dust BUY residual %s qty=%s price=%s (USD=%.4f)",
+                            sym, buys_for_sym[0]["remaining"], buys_for_sym[0]["price"], dust_usd,
+                        )
+                        buys_for_sym.pop(0)
+                    else:
+                        break
+
                 while remaining_sell > 0 and buys_for_sym:
                     buy = buys_for_sym[0]
                     used = min(remaining_sell, buy["remaining"])
@@ -257,33 +274,34 @@ def wallet() -> WalletResponse:
                         buys_for_sym.pop(0)
 
                 if not buy_prices:
-                    # Intentional skip — this SELL closed a position whose cost basis
-                    # predates the tracking system (e.g. trade 10, the post-fix BTC
-                    # SELL that was acquired before W08 was deployed).  The wallet is
-                    # scoped to matched closed positions only; for a portfolio-wide
-                    # total that includes every fill regardless of BUY history, use
-                    # get_total_realised_pnl() in crud.py (which sums Trade.pnl
-                    # across ALL FILLED SELLs, including unmatched ones).
-                    _logger.warning("No matching BUY found for SELL %s qty=%s", sym, qty)
+                    # No valid BUY found — this SELL closed a position whose
+                    # cost basis predates the tracking system, or all BUYs
+                    # were dust.  Still show in closed_positions using the
+                    # actual Trade.pnl (computed by _lookup_avg_entry_price()
+                    # at execution time).  Set buy_price=0 to indicate
+                    # unmatched; the PnL is still correct.
+                    realized_pnl = row["pnl"] if row["pnl"] is not None else Decimal("0")
+                    closed_list.append({
+                        "symbol": sym,
+                        "buy_price": 0.0,
+                        "sell_price": float(price),
+                        "quantity": float(qty),
+                        "realized_pnl": float(realized_pnl),
+                        "realized_pnl_pct": 0.0,
+                        "opened_at": row["created_at"],
+                        "closed_at": row["created_at"],
+                        "is_pre_fix_artifact": row["is_pre_fix_artifact"],
+                    })
+                    _logger.info(
+                        "SELL %s qty=%s unmatched — showing with actual Trade.pnl=%s",
+                        sym, qty, realized_pnl,
+                    )
                     continue
 
                 weighted_buy_price = (
                     sum(u * p for u, p, _, _ in buy_prices) / qty
                     if qty > 0 else Decimal("0")
                 )
-
-                # Sanity check: if weighted buy price is >50% different from
-                # sell price, this match is nonsensical (likely from a partial
-                # FIFO match where dust remained).  Log warning and skip.
-                if weighted_buy_price > 0 and price > 0:
-                    pct_diff = abs(weighted_buy_price - price) / price
-                    if pct_diff > Decimal("0.5"):
-                        _logger.warning(
-                            "FIFO sanity check failed for %s: weighted_buy=%.2f "
-                            "sell=%.2f (diff=%.1f%%) — skipping match",
-                            sym, weighted_buy_price, price, pct_diff * 100,
-                        )
-                        continue
 
                 earliest_open = min(oa for _, _, oa, _ in buy_prices)
                 is_any_artifact = any(ia for _, _, _, ia in buy_prices)
