@@ -826,13 +826,13 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
         else 0.0
     )
 
-    is_statistically_ready = total >= 30
+    is_statistically_ready = settled >= 30
     if not is_statistically_ready:
-        needed = 30 - total
+        needed = 30 - settled
         _logger.warning(
-            "Sentiment trade sample too small (%d trades) — need %d more "
+            "Sentiment trade sample too small (%d settled trades) — need %d more "
             "for statistically reliable validation",
-            total, needed,
+            settled, needed,
         )
 
     return {
