@@ -49,6 +49,12 @@ class ManagerAgent:
         """
         _logger.info("ManagerAgent run — cycle %s", state["cycle_id"])
 
+        trading_pairs = list(state["pipeline_data"].keys())
+        fresh_headlines = self.predictor.refresh_sentiment(trading_pairs)
+        for pair, headlines in fresh_headlines.items():
+            if pair in state["pipeline_data"]:
+                state["pipeline_data"][pair]["news"] = headlines
+
         raw_signals = self.predictor.run_all(state["pipeline_data"])
 
         signals: list[Signal] = []

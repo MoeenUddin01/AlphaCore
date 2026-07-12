@@ -244,6 +244,36 @@ class Predictor:
         )
         return result
 
+    def refresh_sentiment(self, symbol: str) -> dict[str, Any]:
+        """Re-fetch fresh headlines from all sources and re-score sentiment.
+
+        Called just before trade execution to minimise the fetch-to-trade
+        time gap.  Logs the headline count and composite score for
+        auditability.
+
+        Args:
+            symbol: Trading pair in ``BTC/USDT`` format.
+
+        Returns:
+            Dict from :meth:`predict_sentiment` with fresh scores.
+        """
+        import time
+        from src.data.multi_source_news import MultiSourceNewsClient
+
+        fetch_start = time.monotonic()
+        client = MultiSourceNewsClient()
+        headlines = client.fetch_headlines(symbol, limit_per_source=15)
+        fetch_elapsed = time.monotonic() - fetch_start
+
+        _logger.info(
+            "Pre-execution sentiment refresh %s: %d headlines fetched in %.1fs",
+            format_pair_for_binance(symbol), len(headlines), fetch_elapsed,
+        )
+
+        result = self.predict_sentiment(symbol, headlines)
+        result["fetch_to_score_seconds"] = round(fetch_elapsed, 2)
+        return result
+
     def compute_confidence_score(
         self,
         regression_conf: float,

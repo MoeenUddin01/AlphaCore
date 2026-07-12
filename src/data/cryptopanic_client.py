@@ -46,10 +46,10 @@ class CryptoPanicClient:
             ValueError: If ``CRYPTOPANIC_API_KEY`` is not configured.
             RuntimeError: If the API request fails.
         """
-        if not settings.CRYPTOPANIC_API_KEY:
+        if not settings.CRYPTOPANIC_API_KEY or "your_" in settings.CRYPTOPANIC_API_KEY:
             raise ValueError(
-                "CRYPTOPANIC_API_KEY is not set. "
-                "Get a free key at https://cryptopanic.com/developers/api/"
+                "CRYPTOPANIC_API_KEY is not configured. "
+                "Set a real key in .env or leave empty to skip."
             )
 
         _logger.info("Fetching %s news for %s", filter, currencies)

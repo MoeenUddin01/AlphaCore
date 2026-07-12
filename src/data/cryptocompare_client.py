@@ -36,15 +36,15 @@ class CryptoCompareClient:
     }
 
     def __init__(self) -> None:
-        _logger.info("Initialised CryptoCompareClient")
         api_key = settings.CRYPTOCOMPARE_API_KEY
         self.headers: dict[str, str] = {}
-        if api_key:
+        if api_key and "your_" not in api_key:
             self.headers["x-api-key"] = api_key
             _logger.info("CryptoCompareClient using API key")
         else:
             _logger.info("CryptoCompareClient in keyless mode (lower rate limits)")
         self._logged_keys: bool = False
+        self._available: bool = True
 
     def get_news_for_pair(self, pair: str, limit: int = 10) -> list[dict[str, Any]]:
         """Fetch recent CryptoCompare news relevant to *pair*.
@@ -58,6 +58,9 @@ class CryptoCompareClient:
             ``currencies``, ``source``, ``url``.  Sorted by
             ``published_at`` descending.  Empty on failure.
         """
+        if not self._available:
+            return []
+
         base = pair.split("/")[0].upper()
         coin_name = self.SYMBOL_TO_NAME.get(base, base.lower())
         _logger.info("Fetching CryptoCompare news for %s (category: %s)", pair, coin_name)
@@ -71,6 +74,7 @@ class CryptoCompareClient:
             data = self._request(params)
         except Exception as exc:
             _logger.error("CryptoCompare request failed for %s: %s", pair, exc)
+            self._available = False
             return []
 
         if not isinstance(data, dict):

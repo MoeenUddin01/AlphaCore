@@ -14,7 +14,7 @@ import pandas as pd
 from src.data.binance_client import BinanceClient
 from src.data.coingecko_client import CoinGeckoClient
 from src.data.feature_engineer import FeatureEngineer
-from src.data.rss_news_client import CoinDeskRSSClient
+from src.data.multi_source_news import MultiSourceNewsClient
 from src.utils.config import settings
 from src.utils.helpers import format_pair_for_binance
 from src.utils.logger import get_logger
@@ -29,7 +29,7 @@ class DataPipeline:
         _logger.info("Initialising DataPipeline")
         self.binance = BinanceClient()
         self.coingecko = CoinGeckoClient()
-        self.rss_client = CoinDeskRSSClient()
+        self.news_client = MultiSourceNewsClient()
         self.feature_engineer = FeatureEngineer()
         self._cache_dir = Path(settings.DATA_CACHE_DIR)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -98,10 +98,10 @@ class DataPipeline:
                 _logger.error("Market data failed for %s: %s", pair, exc)
                 pair_data["market_data"] = {}
 
-            news = self.rss_client.get_news_for_pair(pair, limit=15)
+            news = self.news_client.fetch_headlines(pair, limit_per_source=15)
             pair_data["news"] = news
             _logger.info(
-                "RSS headlines for %s: %d articles returned",
+                "Multi-source headlines for %s: %d articles returned",
                 pair, len(news),
             )
 

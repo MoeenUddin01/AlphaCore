@@ -48,6 +48,8 @@ def retry_with_backoff(
         for attempt in range(1, max_retries + 1):
             try:
                 return func(*args, **kwargs)
+            except ValueError:
+                raise
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries:

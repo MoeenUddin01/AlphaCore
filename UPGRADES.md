@@ -505,4 +505,35 @@ These directly impact whether the system makes money.
 
 ---
 
-*Last updated: 2026-07-07*
+## Daily Report — 2026-07-12
+
+**Multi-Source News Integration:**
+- Created `src/data/multi_source_news.py` — combines CoinDesk RSS + CryptoPanic + CryptoCompare
+- Deduplication by title similarity (SequenceMatcher threshold ≥0.75)
+- Relevance filter drops headlines without coin ticker or directional keyword
+- Updated `data_pipeline.py` to use `MultiSourceNewsClient`
+- Pre-execution sentiment refresh added to manager agent
+
+**Bug Fixes:**
+- Fixed retry overhead: `retry_with_backoff` now skips ValueError (config errors) immediately — no 20s wasted on placeholder API keys
+- CryptoPanic skips gracefully when no valid API key configured
+- CryptoCompare gracefully disables on 401 (API now requires auth)
+
+**Performance:**
+- Fetch time with invalid keys: 20+ seconds → 2.9 seconds (instant fail)
+- CoinDesk RSS still primary source, CryptoPanic + CryptoCompare as supplements
+- 68/68 tests pass
+
+**Current State:**
+- Only CoinDesk RSS active (CryptoPanic needs API key, CryptoCompare needs API key)
+- Multi-source ready for activation when keys are provided
+- `refresh_sentiment()` wired into manager agent — sentiment refreshed right before execution
+
+**What's Needed:**
+- Add `CRYPTOPANIC_API_KEY` to `.env` for CryptoPanic source
+- Add `CRYPTOCOMPARE_API_KEY` to `.env` for CryptoCompare source
+- Monitor bot-only trades toward 30-trade threshold for sentiment validation
+
+---
+
+*Last updated: 2026-07-12*
