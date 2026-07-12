@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     CRYPTOPANIC_API_KEY: str
     COINGECKO_API_KEY: str = ""
     CRYPTOCOMPARE_API_KEY: str = ""
+    COINMARKETCAP_API_KEY: str = ""
 
     REDDIT_CLIENT_ID: str = ""
     REDDIT_CLIENT_SECRET: str = ""

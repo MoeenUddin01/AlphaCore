@@ -1,6 +1,6 @@
 """Multi-source news aggregator with deduplication and relevance filtering.
 
-Combines CoinDesk RSS, CryptoPanic, and CryptoCompare into a single
+Combines CoinDesk RSS, CryptoPanic, CryptoCompare, and CoinMarketCap into a single
 ``fetch_headlines(pair)`` call.  Headlines are deduplicated by title
 similarity and filtered to exclude generic market-recap articles that
 add noise to sentiment scoring.
@@ -75,6 +75,7 @@ class MultiSourceNewsClient:
         # Lazy-init optional clients (they may lack API keys)
         self._cryptopanic = None
         self._cryptocompare = None
+        self._coinmarketcap = None
 
         try:
             from src.data.cryptopanic_client import CryptoPanicClient
@@ -87,6 +88,12 @@ class MultiSourceNewsClient:
             self._cryptocompare = CryptoCompareClient()
         except Exception:
             _logger.debug("CryptoCompare client not available")
+
+        try:
+            from src.data.coinmarketcap_client import CoinMarketCapClient
+            self._coinmarketcap = CoinMarketCapClient()
+        except Exception:
+            _logger.debug("CoinMarketCap client not available")
 
     # ------------------------------------------------------------------
     def fetch_headlines(
@@ -134,6 +141,15 @@ class MultiSourceNewsClient:
                 _logger.info("CryptoCompare: %d headlines for %s", len(cc_items), pair)
             except Exception as exc:
                 _logger.warning("CryptoCompare fetch failed for %s: %s", pair, exc)
+
+        # --- Source 4: CoinMarketCap (crypto-native news) ---
+        if self._coinmarketcap is not None:
+            try:
+                cmc_items = self._coinmarketcap.get_news_for_pair(pair, limit=limit_per_source)
+                raw.extend(cmc_items)
+                _logger.info("CoinMarketCap: %d headlines for %s", len(cmc_items), pair)
+            except Exception as exc:
+                _logger.warning("CoinMarketCap fetch failed for %s: %s", pair, exc)
 
         _logger.info("Total raw headlines for %s: %d", pair, len(raw))
 
