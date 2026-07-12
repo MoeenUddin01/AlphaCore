@@ -1,8 +1,9 @@
 """FinBERT sentiment analysis for crypto news headlines.
 
 Wraps the ProsusAI/finbert model from HuggingFace to score individual
-headlines and aggregate sentiment over a batch of news with time-decay
-weighting so that fresher headlines contribute more to the composite score.
+heads and aggregate sentiment over a batch of news with exponential
+time-decay weighting so that fresher headlines contribute more to the
+composite score.
 """
 
 from datetime import datetime, timezone
@@ -13,10 +14,15 @@ import torch.nn.functional as F
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from src.utils.logger import get_logger
+from src.utils.timestamps import normalize_timestamp
 
 _logger = get_logger(__name__)
 
 _LABELS = ["positive", "negative", "neutral"]
+
+# --- Configurable half-life for exponential decay ---
+# Headlines at this age receive 50% weight; at 2x half-life → 25%; at 3x → 12.5%.
+HALF_LIFE_HOURS: float = 12.0
 
 
 class SentimentModel:
@@ -92,16 +98,28 @@ class SentimentModel:
         """
         return [self.score_headline(h) for h in headlines]
 
-    def aggregate_sentiment(self, headline_dicts: list[dict[str, Any]]) -> dict[str, Any]:
-        """Score all headlines and return time-decay-weighted sentiment.
+    def aggregate_sentiment(
+        self,
+        headline_dicts: list[dict[str, Any]],
+        half_life_hours: float = HALF_LIFE_HOURS,
+    ) -> dict[str, Any]:
+        """Score all headlines and return exponential-decay-weighted sentiment.
 
         Each headline dict must contain a ``title`` (str) and a
-        ``published_at`` (datetime).  Fresher headlines receive higher
-        weight via a linear decay over 24 hours (floor 10 %).
+        ``published_at`` (str or datetime).  Fresher headlines receive
+        higher weight via exponential decay::
+
+            weight = 0.5 ** (age_hours / half_life_hours)
+
+        A headline at ``half_life_hours`` age gets 50% weight; at 2× it
+        gets 25%; at 3× it gets 12.5%, etc.  Headlines older than ~48h
+        contribute minimally (<3%).
 
         Args:
             headline_dicts: List of dicts with ``title`` and
                 ``published_at`` keys. May be empty.
+            half_life_hours: Half-life in hours for the exponential
+                decay (default 12.0).
 
         Returns:
             Dict with weighted ``positive``, ``negative``, ``neutral``
@@ -130,15 +148,11 @@ class SentimentModel:
             titles.append(title)
 
             published = h.get("published_at")
-            if isinstance(published, datetime):
-                if published.tzinfo is None:
-                    published = published.replace(tzinfo=timezone.utc)
-                hours_old = (now - published).total_seconds() / 3600.0
-            else:
-                hours_old = 24.0
+            ts = normalize_timestamp(published)
+            hours_old = max(0.0, (now - ts).total_seconds() / 3600.0)
 
             total_age += hours_old
-            weight = max(0.1, 1.0 - (hours_old / 24.0))
+            weight = 0.5 ** (hours_old / half_life_hours)
             weights.append(weight)
 
         if not titles:
@@ -167,9 +181,10 @@ class SentimentModel:
         weighted["avg_headline_age_hours"] = round(total_age / len(titles), 2)
 
         _logger.info(
-            "Aggregated sentiment: composite=%.4f avg_age=%.1fh weights=%d",
+            "Aggregated sentiment: composite=%.4f avg_age=%.1fh weights=%d half_life=%.0fh",
             weighted["composite_score"],
             weighted["avg_headline_age_hours"],
             len(weights),
+            half_life_hours,
         )
         return weighted
