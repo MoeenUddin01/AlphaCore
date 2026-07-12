@@ -796,7 +796,8 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
     total_sentiment_trades = total
     winning_trades = len(winners)
     losing_trades = len(losers)
-    win_rate_pct = (winning_trades / total * 100) if total > 0 else 0.0
+    settled_trades = winning_trades + losing_trades
+    win_rate_pct = (winning_trades / settled_trades * 100) if settled_trades > 0 else 0.0
 
     avg_win_amount = (
         sum(r["pnl"] for r in winners) / winning_trades
