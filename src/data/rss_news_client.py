@@ -11,6 +11,7 @@ from typing import Any
 import feedparser
 
 from src.utils.logger import get_logger
+from src.utils.timestamps import normalize_timestamp
 
 _logger = get_logger(__name__)
 
@@ -84,13 +85,13 @@ class CoinDeskRSSClient:
 
             matched.append({
                 "title": title,
-                "published_at": published,
+                "published_at": published.isoformat(),
                 "currencies": [base],
                 "source": "CoinDesk RSS",
                 "url": entry.get("link", ""),
             })
 
-        matched.sort(key=lambda n: n["published_at"], reverse=True)
+        matched.sort(key=lambda n: normalize_timestamp(n["published_at"]), reverse=True)
 
         _logger.info(
             "CoinDesk RSS: %d/%d entries matched %s",

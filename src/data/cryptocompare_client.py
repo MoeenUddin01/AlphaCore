@@ -4,6 +4,12 @@ Uses the CoinDesk-branded CryptoCompare API at ``data-api.coindesk.com``.
 Works with or without an API key (keyless tier has lower rate limits).
 Provides the same interface as ``CryptoPanicClient`` for drop-in
 compatibility in the data pipeline.
+
+STATUS: DORMANT — the API now returns 401 Unauthorized without a valid
+key in CRYPTOCOMPARE_API_KEY.  Keyless mode no longer works.  The client
+auto-disables after the first 401 to avoid wasting retries.  Once a real
+key is added to .env, this source activates automatically.
+Get a free key at: https://min-api.cryptocompare.com/
 """
 
 from datetime import datetime, timezone

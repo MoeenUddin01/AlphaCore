@@ -2,6 +2,11 @@
 
 Provides access to the CryptoPanic news aggregator for sentiment analysis
 and news-driven trading signals.
+
+STATUS: DORMANT — requires a valid API key in CRYPTOPANIC_API_KEY.
+The client gracefully skips when no key is configured (raises ValueError).
+Once a real key is added to .env, this source activates automatically.
+Get a free key at: https://cryptopanic.com/developers/api/
 """
 
 from datetime import datetime

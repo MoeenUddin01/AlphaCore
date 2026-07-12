@@ -1,9 +1,9 @@
 """Multi-source news aggregator with deduplication and relevance filtering.
 
-Combines CoinDesk RSS, CryptoPanic, CryptoCompare, and CoinMarketCap into
-a single ``fetch_headlines(pair)`` call.  Headlines are deduplicated by
-title similarity and filtered to exclude generic market-recap articles
-that add noise to sentiment scoring.
+Combines CoinDesk RSS, CryptoPanic, CryptoCompare, CoinMarketCap,
+Currents, and GNews into a single ``fetch_headlines(pair)`` call.
+Headlines are deduplicated by title similarity and filtered to exclude
+generic market-recap articles that add noise to sentiment scoring.
 """
 
 import re
@@ -12,6 +12,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from src.data.rss_news_client import CoinDeskRSSClient
+from src.utils.timestamps import normalize_timestamp
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -134,18 +135,22 @@ class MultiSourceNewsClient:
         except Exception as exc:
             _logger.warning("RSS fetch failed for %s: %s", pair, exc)
 
-        # --- Source 2: CryptoPanic (needs API key) ---
+        # --- Source 2: CryptoPanic (DORMANT — needs valid API key) ---
+        # Skips gracefully when no key is configured. Activates automatically
+        # once CRYPTOPANIC_API_KEY is set in .env.
         if self._cryptopanic is not None:
             try:
                 cp_items = self._cryptopanic.get_news_for_pair(pair, limit=limit_per_source)
                 raw.extend(cp_items)
                 _logger.info("CryptoPanic: %d headlines for %s", len(cp_items), pair)
             except ValueError:
-                _logger.debug("CryptoPanic: no valid API key, skipping")
+                _logger.debug("CryptoPanic: dormant (no valid API key), skipping")
             except Exception as exc:
                 _logger.warning("CryptoPanic fetch failed for %s: %s", pair, exc)
 
-        # --- Source 3: CryptoCompare (works with or without key) ---
+        # --- Source 3: CryptoCompare (DORMANT — API requires key, keyless returns 401) ---
+        # Auto-disables after first 401. Activates automatically once
+        # CRYPTOCOMPARE_API_KEY is set in .env.
         if self._cryptocompare is not None:
             try:
                 cc_items = self._cryptocompare.get_news_for_pair(pair, limit=limit_per_source)
@@ -201,13 +206,15 @@ class MultiSourceNewsClient:
 
         _logger.info("After dedup: %d / %d", len(deduped), len(relevant))
 
-        # Sort by published_at descending
-        def _sort_key(n: dict[str, Any]) -> str:
-            val = n.get("published_at", "")
-            if isinstance(val, str):
-                return val
-            return str(val) if val else ""
+        # Normalise all timestamps before sorting
+        for item in deduped:
+            item["_parsed_ts"] = normalize_timestamp(item.get("published_at"))
 
-        deduped.sort(key=_sort_key, reverse=True)
+        # Sort by normalised timestamp descending
+        deduped.sort(key=lambda n: n["_parsed_ts"], reverse=True)
+
+        # Clean up internal key
+        for item in deduped:
+            item.pop("_parsed_ts", None)
 
         return deduped[:limit_per_source * 2]
