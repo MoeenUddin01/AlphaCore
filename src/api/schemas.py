@@ -78,6 +78,10 @@ class PerformanceMetricsResponse(BaseModel):
     worst_trade: float
     total_realised_pnl: float
     current_drawdown: float
+    bot_only_trades: int = 0
+    bot_only_win_rate: float = 0.0
+    bot_only_avg_pnl: float = 0.0
+    bot_only_total_pnl: float = 0.0
 
     model_config: Any = ConfigDict(from_attributes=True)
 
@@ -125,6 +129,7 @@ class ClosedTradeResponse(BaseModel):
     opened_at: datetime
     closed_at: datetime
     is_pre_fix_artifact: bool = False
+    trade_origin: str = "bot_sentiment"
 
     model_config: Any = ConfigDict(from_attributes=True)
 
@@ -138,6 +143,9 @@ class WalletResponse(BaseModel):
     total_realized_pnl: float
     holdings: list[HoldingResponse]
     closed_positions: list[ClosedTradeResponse]
+    bot_only_realized_pnl: float = 0.0
+    bot_only_trades: int = 0
+    all_trades_pnl: float = 0.0
 
     model_config: Any = ConfigDict(from_attributes=True)
 

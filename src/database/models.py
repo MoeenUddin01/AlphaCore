@@ -82,6 +82,7 @@ class Trade(Base):
     order_id = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="proposed")
     is_sentiment_driven = Column(Boolean, nullable=False, default=True)
+    trade_origin = Column(String(20), nullable=False, default="bot_sentiment")
     signal_confidence = Column(Numeric(10, 4), nullable=True)
     reasoning = Column(Text, nullable=True)
     pnl = Column(Numeric(20, 8), nullable=True)

@@ -103,6 +103,7 @@ def save_cycle(state: AgentState) -> str:
                     order_id=et.order_id,
                     status=et.status,
                     is_sentiment_driven=getattr(p, "is_sentiment_driven", True),
+                    trade_origin=getattr(p, "trade_origin", "bot_sentiment"),
                     signal_confidence=getattr(p, "signal_confidence", None),
                     reasoning=p.reasoning,
                     pnl=et.pnl,
@@ -569,18 +570,19 @@ def get_latest_signals() -> list[dict[str, Any]]:
 def get_performance_metrics() -> dict[str, Any]:
     """Aggregate performance statistics from the database.
 
-    Computes:
-        - ``total_trades`` — number of trades with status ``FILLED``
-        - ``win_rate`` — fraction of filled trades with positive PnL
-        - ``avg_pnl`` — mean realised PnL per filled trade
-        - ``best_trade`` — maximum realised PnL
-        - ``worst_trade`` — minimum realised PnL
-        - ``total_realised_pnl`` — sum of all realised PnL
-        - ``current_drawdown_pct`` — drawdown from the latest snapshot
+    Computes two sets of metrics side by side:
+
+    **All-trades** (post-validation_start_date):
+        Filled SELLs regardless of origin.
+
+    **Bot-only** (post-validation_start_date):
+        Only fills with ``trade_origin`` in ``('bot_sentiment', 'bot_auto_exit')``.
+        Excludes manual trades and pre-tracking artefacts.
 
     Returns:
-        Dict with all computed metrics. Values default to ``0`` / ``0.0``
-        when no data is available.
+        Dict with keys ``total_trades``, ``win_rate``, ``avg_pnl``,
+        ``best_trade``, ``worst_trade``, ``total_realised_pnl``,
+        ``current_drawdown_pct``, plus ``bot_only_*`` equivalents.
     """
     metrics: dict[str, Any] = {
         "total_trades": 0,
@@ -590,15 +592,27 @@ def get_performance_metrics() -> dict[str, Any]:
         "worst_trade": 0.0,
         "total_realised_pnl": 0.0,
         "current_drawdown_pct": 0.0,
+        # Bot-only split
+        "bot_only_trades": 0,
+        "bot_only_win_rate": 0.0,
+        "bot_only_avg_pnl": 0.0,
+        "bot_only_total_pnl": 0.0,
     }
 
     with get_db() as db:
+        # --- Validation start date ---
+        from src.database.models import PortfolioState
+        pstate = db.query(PortfolioState).filter(PortfolioState.id == "singleton").first()
+        val_start = pstate.validation_start_date if pstate and pstate.validation_start_date else None
+
+        # --- All-trades (post-validation) ---
+        base_filter = [Trade.status == "FILLED", Trade.is_pre_fix_artifact == False]
+        if val_start:
+            base_filter.append(Trade.created_at >= val_start)
+
         filled_count: int = (
             db.query(func.count(Trade.id))
-            .filter(
-                Trade.status == "FILLED",
-                Trade.is_pre_fix_artifact == False,
-            )
+            .filter(*base_filter)
             .scalar()
             or 0
         )
@@ -607,11 +621,7 @@ def get_performance_metrics() -> dict[str, Any]:
         if filled_count > 0:
             pnl_values = (
                 db.query(Trade.pnl)
-                .filter(
-                    Trade.status == "FILLED",
-                    Trade.is_pre_fix_artifact == False,
-                    Trade.pnl.isnot(None),
-                )
+                .filter(*base_filter, Trade.pnl.isnot(None))
                 .all()
             )
             pnl_list = [float(row[0]) for row in pnl_values if row[0] is not None]
@@ -623,6 +633,31 @@ def get_performance_metrics() -> dict[str, Any]:
                 wins = sum(1 for p in pnl_list if p > 0)
                 metrics["win_rate"] = wins / len(pnl_list)
                 metrics["total_realised_pnl"] = sum(pnl_list)
+
+        # --- Bot-only (post-validation) ---
+        bot_filter = base_filter + [
+            Trade.trade_origin.in_(["bot_sentiment", "bot_auto_exit"]),
+        ]
+        bot_count: int = (
+            db.query(func.count(Trade.id))
+            .filter(*bot_filter)
+            .scalar()
+            or 0
+        )
+        metrics["bot_only_trades"] = bot_count
+
+        if bot_count > 0:
+            bot_pnl_values = (
+                db.query(Trade.pnl)
+                .filter(*bot_filter, Trade.pnl.isnot(None))
+                .all()
+            )
+            bot_pnl_list = [float(row[0]) for row in bot_pnl_values if row[0] is not None]
+            if bot_pnl_list:
+                metrics["bot_only_avg_pnl"] = sum(bot_pnl_list) / len(bot_pnl_list)
+                bot_wins = sum(1 for p in bot_pnl_list if p > 0)
+                metrics["bot_only_win_rate"] = bot_wins / len(bot_pnl_list)
+                metrics["bot_only_total_pnl"] = sum(bot_pnl_list)
 
         latest_dd = (
             db.query(PortfolioSnapshot.drawdown_pct)
@@ -785,9 +820,36 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
             {
                 "pnl": float(r.pnl) if r.pnl is not None else None,
                 "signal_confidence": float(r.signal_confidence) if r.signal_confidence is not None else None,
+                "trade_origin": r.trade_origin if hasattr(r, "trade_origin") else "bot_sentiment",
             }
             for r in rows
         ]
+
+        # Also get bot-only trades (post-validation, trade_origin in bot origins)
+        bot_filter = [
+            Trade.trade_origin.in_(["bot_sentiment", "bot_auto_exit"]),
+            Trade.is_pre_fix_artifact == False,
+            Trade.status == "FILLED",
+            trade_date_filter,
+        ]
+        bot_rows_raw = db.query(Trade).filter(*bot_filter).all()
+        _bot_rows: list[dict[str, Any]] = [
+            {
+                "pnl": float(r.pnl) if r.pnl is not None else None,
+                "signal_confidence": float(r.signal_confidence) if r.signal_confidence is not None else None,
+                "trade_origin": r.trade_origin,
+            }
+            for r in bot_rows_raw
+        ]
+
+        # Origin breakdown
+        origin_counts: dict[str, int] = {}
+        origin_pnl: dict[str, float] = {}
+        for r in _rows:
+            o = r["trade_origin"]
+            origin_counts[o] = origin_counts.get(o, 0) + 1
+            if r["pnl"] is not None:
+                origin_pnl[o] = origin_pnl.get(o, 0.0) + r["pnl"]
 
     total = len(_rows)
     winners = [r for r in _rows if r["pnl"] is not None and r["pnl"] > 0]
@@ -826,13 +888,20 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
         else 0.0
     )
 
-    is_statistically_ready = settled >= 30
+    # Bot-only stats
+    bot_winners = [r for r in _bot_rows if r["pnl"] is not None and r["pnl"] > 0]
+    bot_losers = [r for r in _bot_rows if r["pnl"] is not None and r["pnl"] <= 0]
+    bot_settled = len(bot_winners) + len(bot_losers)
+    bot_win_rate = (len(bot_winners) / bot_settled * 100) if bot_settled > 0 else 0.0
+    bot_total_pnl = sum(r["pnl"] for r in _bot_rows if r["pnl"] is not None)
+
+    is_statistically_ready = settled_trades >= 30
     if not is_statistically_ready:
-        needed = 30 - settled
+        needed = 30 - settled_trades
         _logger.warning(
             "Sentiment trade sample too small (%d settled trades) — need %d more "
             "for statistically reliable validation",
-            settled, needed,
+            settled_trades, needed,
         )
 
     return {
@@ -846,4 +915,12 @@ def get_sentiment_trade_performance(days: int = 30) -> dict[str, Any]:
         "avg_sentiment_score_winners": round(avg_sentiment_score_winners, 4),
         "avg_sentiment_score_losers": round(avg_sentiment_score_losers, 4),
         "is_statistically_ready": is_statistically_ready,
+        "origin_breakdown": {k: {"count": v, "pnl": round(origin_pnl.get(k, 0.0), 2)} for k, v in origin_counts.items()},
+        "bot_only": {
+            "total_trades": len(_bot_rows),
+            "winning_trades": len(bot_winners),
+            "losing_trades": len(bot_losers),
+            "win_rate_pct": round(bot_win_rate, 2),
+            "total_pnl": round(bot_total_pnl, 2),
+        },
     }

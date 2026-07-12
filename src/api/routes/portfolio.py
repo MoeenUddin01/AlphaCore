@@ -74,8 +74,16 @@ def portfolio_metrics() -> PerformanceMetricsResponse:
             worst_trade=metrics["worst_trade"],
             total_realised_pnl=metrics["total_realised_pnl"],
             current_drawdown=metrics["current_drawdown_pct"],
+            bot_only_trades=metrics["bot_only_trades"],
+            bot_only_win_rate=metrics["bot_only_win_rate"],
+            bot_only_avg_pnl=metrics["bot_only_avg_pnl"],
+            bot_only_total_pnl=metrics["bot_only_total_pnl"],
         )
-        _logger.info("GET /portfolio/metrics -> %d trades", resp.total_trades)
+        _logger.info(
+            "GET /portfolio/metrics -> all: %d trades (%.1f%%), bot-only: %d trades (%.1f%%)",
+            resp.total_trades, resp.win_rate * 100,
+            resp.bot_only_trades, resp.bot_only_win_rate * 100,
+        )
         return resp
     except Exception:
         _logger.exception("GET /portfolio/metrics failed")
@@ -203,6 +211,7 @@ def wallet() -> WalletResponse:
                     "pnl": Decimal(str(t.pnl)) if t.pnl is not None else None,
                     "created_at": t.created_at,
                     "is_pre_fix_artifact": t.is_pre_fix_artifact if hasattr(t, "is_pre_fix_artifact") else False,
+                    "trade_origin": t.trade_origin if hasattr(t, "trade_origin") else "bot_sentiment",
                 }
                 for t in all_trades_raw
             ]
@@ -291,6 +300,7 @@ def wallet() -> WalletResponse:
                         "opened_at": row["created_at"],
                         "closed_at": row["created_at"],
                         "is_pre_fix_artifact": row["is_pre_fix_artifact"],
+                        "trade_origin": row["trade_origin"],
                     })
                     _logger.info(
                         "SELL %s qty=%s unmatched — showing with actual Trade.pnl=%s",
@@ -322,6 +332,7 @@ def wallet() -> WalletResponse:
                     "opened_at": earliest_open,
                     "closed_at": row["created_at"],
                     "is_pre_fix_artifact": is_artifact,
+                    "trade_origin": row["trade_origin"],
                 })
 
         # Aggregate realised PnL excluding pre-fix artifacts
@@ -333,13 +344,30 @@ def wallet() -> WalletResponse:
 
         closed_responses = [ClosedTradeResponse(**c) for c in closed_list]
 
+        # Bot-only vs all-trades summary
+        bot_only_pnl = sum(
+            Decimal(str(c["realized_pnl"]))
+            for c in closed_list
+            if c["trade_origin"] in ("bot_sentiment", "bot_auto_exit")
+            and not c["is_pre_fix_artifact"]
+        )
+        bot_only_count = sum(
+            1 for c in closed_list
+            if c["trade_origin"] in ("bot_sentiment", "bot_auto_exit")
+            and not c["is_pre_fix_artifact"]
+        )
+        all_trades_pnl = total_realised_excl_artifacts
+
         resp = WalletResponse(
             cash_balance=float(cash),
             total_holdings_value=float(total_holdings_value),
             total_unrealized_pnl=float(total_unrealised_pnl),
-            total_realized_pnl=float(total_realised_excl_artifacts),
+            total_realized_pnl=float(all_trades_pnl),
             holdings=holdings_list,
             closed_positions=closed_responses,
+            bot_only_realized_pnl=float(bot_only_pnl),
+            bot_only_trades=bot_only_count,
+            all_trades_pnl=float(all_trades_pnl),
         )
         _logger.info(
             "GET /portfolio/wallet -> cash=%.2f, %d holding(s), %d closed trade(s)",
@@ -531,6 +559,7 @@ def manual_sell(req: ManualSellRequest) -> dict[str, Any]:
                 order_id=str(order_id),
                 status="FILLED",
                 reasoning=f"Manual SELL from wallet — user-initiated",
+                trade_origin="manual",
                 pnl=float(pnl) if pnl is not None else None,
             )
             db.add(trade)

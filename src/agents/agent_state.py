@@ -90,6 +90,12 @@ class ProposedTrade:
     Auto-exit trades bypass the sentiment strength filter in the Manager
     Agent — closing a position for risk reasons must never be blocked."""
 
+    trade_origin: str = "bot_sentiment"
+    """Classifies who initiated this trade for performance reporting.
+    ``bot_sentiment`` — sentiment-driven entry/exit,
+    ``bot_auto_exit`` — mechanical SL/TP exit,
+    ``manual`` — user-initiated from wallet UI."""
+
 
 @dataclass
 class ExecutedTrade:

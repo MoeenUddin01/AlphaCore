@@ -237,6 +237,7 @@ class PortfolioMonitor:
                 reasoning=f"AUTO-EXIT: {reason} triggered at {float(current_price):.2f}",
                 is_sentiment_driven=False,
                 is_auto_exit=True,
+                trade_origin="bot_auto_exit",
             )
             auto_exits.append(auto_exit)
 
