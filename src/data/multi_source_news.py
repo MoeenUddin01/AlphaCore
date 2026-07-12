@@ -1,9 +1,9 @@
 """Multi-source news aggregator with deduplication and relevance filtering.
 
-Combines CoinDesk RSS, CryptoPanic, CryptoCompare, and CoinMarketCap into a single
-``fetch_headlines(pair)`` call.  Headlines are deduplicated by title
-similarity and filtered to exclude generic market-recap articles that
-add noise to sentiment scoring.
+Combines CoinDesk RSS, CryptoPanic, CryptoCompare, and CoinMarketCap into
+a single ``fetch_headlines(pair)`` call.  Headlines are deduplicated by
+title similarity and filtered to exclude generic market-recap articles
+that add noise to sentiment scoring.
 """
 
 import re
