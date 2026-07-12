@@ -95,6 +95,18 @@ class MultiSourceNewsClient:
         except Exception:
             _logger.debug("CoinMarketCap client not available")
 
+        try:
+            from src.data.currents_client import CurrentsClient
+            self._currents = CurrentsClient()
+        except Exception:
+            _logger.debug("Currents client not available")
+
+        try:
+            from src.data.gnews_client import GNewsClient
+            self._gnews = GNewsClient()
+        except Exception:
+            _logger.debug("GNews client not available")
+
     # ------------------------------------------------------------------
     def fetch_headlines(
         self,
@@ -151,6 +163,24 @@ class MultiSourceNewsClient:
             except Exception as exc:
                 _logger.warning("CoinMarketCap fetch failed for %s: %s", pair, exc)
 
+        # --- Source 5: Currents API (1,000 free req/day) ---
+        if self._currents is not None:
+            try:
+                cur_items = self._currents.get_news_for_pair(pair, limit=limit_per_source)
+                raw.extend(cur_items)
+                _logger.info("Currents: %d headlines for %s", len(cur_items), pair)
+            except Exception as exc:
+                _logger.warning("Currents fetch failed for %s: %s", pair, exc)
+
+        # --- Source 6: GNews API (free tier) ---
+        if self._gnews is not None:
+            try:
+                gn_items = self._gnews.get_news_for_pair(pair, limit=limit_per_source)
+                raw.extend(gn_items)
+                _logger.info("GNews: %d headlines for %s", len(gn_items), pair)
+            except Exception as exc:
+                _logger.warning("GNews fetch failed for %s: %s", pair, exc)
+
         _logger.info("Total raw headlines for %s: %d", pair, len(raw))
 
         # --- Relevance filter ---
@@ -172,6 +202,12 @@ class MultiSourceNewsClient:
         _logger.info("After dedup: %d / %d", len(deduped), len(relevant))
 
         # Sort by published_at descending
-        deduped.sort(key=lambda n: n.get("published_at", datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+        def _sort_key(n: dict[str, Any]) -> str:
+            val = n.get("published_at", "")
+            if isinstance(val, str):
+                return val
+            return str(val) if val else ""
+
+        deduped.sort(key=_sort_key, reverse=True)
 
         return deduped[:limit_per_source * 2]
