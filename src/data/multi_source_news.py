@@ -177,14 +177,18 @@ class MultiSourceNewsClient:
             except Exception as exc:
                 _logger.warning("Currents fetch failed for %s: %s", pair, exc)
 
-        # --- Source 6: GNews API (free tier) ---
-        if self._gnews is not None:
-            try:
-                gn_items = self._gnews.get_news_for_pair(pair, limit=limit_per_source)
-                raw.extend(gn_items)
-                _logger.info("GNews: %d headlines for %s", len(gn_items), pair)
-            except Exception as exc:
-                _logger.warning("GNews fetch failed for %s: %s", pair, exc)
+        # --- Source 6: GNews API (DORMANT — free tier has ~12h indexing delay) ---
+        # Structurally delayed: freshest headline is always 12-17h old.
+        # Removed from active pipeline 2026-07-12. If GNews offers a faster
+        # free tier or a paid plan, re-enable by uncommenting below.
+        #
+        # if self._gnews is not None:
+        #     try:
+        #         gn_items = self._gnews.get_news_for_pair(pair, limit=limit_per_source)
+        #         raw.extend(gn_items)
+        #         _logger.info("GNews: %d headlines for %s", len(gn_items), pair)
+        #     except Exception as exc:
+        #         _logger.warning("GNews fetch failed for %s: %s", pair, exc)
 
         _logger.info("Total raw headlines for %s: %d", pair, len(raw))
 
