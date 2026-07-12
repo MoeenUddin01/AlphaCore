@@ -217,6 +217,17 @@ def wallet() -> WalletResponse:
             side = row["side"]
 
             if side == "BUY":
+                # Skip dust BUYs: quantity * price < $1 USD (consistent with
+                # reconcile_positions() dust filter).  These tiny residuals
+                # from rounding create nonsensical weighted buy prices when
+                # matched against large SELLs.
+                usd_value = qty * price
+                if usd_value < Decimal("1"):
+                    _logger.debug(
+                        "Skipping dust BUY %s qty=%s price=%s (USD=%.4f)",
+                        sym, qty, price, usd_value,
+                    )
+                    continue
                 if sym not in buy_queue:
                     buy_queue[sym] = []
                 buy_queue[sym].append({
@@ -260,6 +271,20 @@ def wallet() -> WalletResponse:
                     sum(u * p for u, p, _, _ in buy_prices) / qty
                     if qty > 0 else Decimal("0")
                 )
+
+                # Sanity check: if weighted buy price is >50% different from
+                # sell price, this match is nonsensical (likely from a partial
+                # FIFO match where dust remained).  Log warning and skip.
+                if weighted_buy_price > 0 and price > 0:
+                    pct_diff = abs(weighted_buy_price - price) / price
+                    if pct_diff > Decimal("0.5"):
+                        _logger.warning(
+                            "FIFO sanity check failed for %s: weighted_buy=%.2f "
+                            "sell=%.2f (diff=%.1f%%) — skipping match",
+                            sym, weighted_buy_price, price, pct_diff * 100,
+                        )
+                        continue
+
                 earliest_open = min(oa for _, _, oa, _ in buy_prices)
                 is_any_artifact = any(ia for _, _, _, ia in buy_prices)
 
