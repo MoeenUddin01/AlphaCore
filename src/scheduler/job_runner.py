@@ -19,9 +19,11 @@ from src.scheduler.jobs import (
     health_check_job,
     reconcile_positions,
     run_data_cache_refresh,
+    run_exit_check,
     run_model_training,
     run_trading_cycle,
 )
+from src.utils.config import settings
 from src.utils.helpers import send_alert
 from src.utils.logger import get_logger
 
@@ -54,6 +56,14 @@ class SchedulerRunner:
             run_trading_cycle,
             trigger=IntervalTrigger(hours=1),
             id="trading_cycle",
+            max_instances=1,
+            replace_existing=True,
+        )
+
+        self.scheduler.add_job(
+            run_exit_check,
+            trigger=IntervalTrigger(minutes=settings.EXIT_CHECK_INTERVAL_MINUTES),
+            id="exit_check",
             max_instances=1,
             replace_existing=True,
         )

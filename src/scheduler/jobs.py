@@ -1,12 +1,14 @@
 """Scheduled job definitions for the AlphaCore trading system.
 
-Defines the four recurring jobs that APScheduler runs:
+Defines the recurring jobs that APScheduler runs:
     - Trading cycle (1h)
+    - Exit-condition check (configurable, default 15m)
     - Data cache refresh (30m)
     - Health check (5m)
     - Model training (once on startup)
 """
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -14,17 +16,20 @@ from uuid import uuid4
 from filelock import FileLock, Timeout
 
 from src.agents import run_cycle
+from src.agents.agent_state import AgentState, ProposedTrade
+from src.data.binance_client import BinanceClient
 from src.data.data_pipeline import DataPipeline
-from src.database.connection import check_db_connection, init_db
+from src.database.connection import check_db_connection, get_db, init_db
 from src.database.crud import get_current_portfolio_state, get_total_realised_pnl, is_cycle_already_processed, save_cycle, update_positions
-from src.database.models import PortfolioSnapshot, Trade as TradeModel
+from src.database.models import PortfolioSnapshot, Position as PositionModel, Trade as TradeModel
 from src.utils.config import settings
-from src.utils.helpers import send_alert
+from src.utils.helpers import format_pair_for_binance, send_alert
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
 
 _LOCK_PATH = f"{settings.DATA_CACHE_DIR}/.trading_cycle.lock"
+_EXIT_LOCK_PATH = f"{settings.DATA_CACHE_DIR}/.exit_check.lock"
 
 _SANE_PORTFOLIO_MIN = Decimal("0")
 _SANE_PORTFOLIO_MAX_MULTIPLIER = Decimal("10")
@@ -223,6 +228,190 @@ def run_trading_cycle() -> None:
     finally:
         lock.release()
         _logger.debug("Released trading cycle lock at %s", _LOCK_PATH)
+
+
+def run_exit_check() -> None:
+    """Check SL/TP for every open position and execute triggered exits.
+
+    Runs independently of the full trading cycle at a configurable interval
+    (``EXIT_CHECK_INTERVAL_MINUTES``, default 15 min). For each open position:
+    fetches the live price, compares against stop-loss / take-profit thresholds,
+    and if triggered, places a market SELL order via the Binance Testnet,
+    persists the trade, and removes/reduces the Position row.
+
+    Uses a separate lock file to avoid conflicting with the trading cycle.
+    """
+    _logger.info("=== EXIT CHECK START ===")
+
+    lock = FileLock(_EXIT_LOCK_PATH, timeout=5)
+    try:
+        lock.acquire()
+    except Timeout:
+        _logger.warning(
+            "Cannot acquire exit-check lock — another exit check is already running. Skipping."
+        )
+        return
+
+    try:
+        portfolio_summary: dict[str, Any] = get_current_portfolio_state()
+        holdings: dict[str, Any] = portfolio_summary.get("holdings", {})
+        if not holdings:
+            _logger.info("No open positions — nothing to check")
+            return
+
+        binance = BinanceClient()
+        from src.agents.execution_agent import ExecutionAgent
+        execution_agent = ExecutionAgent()
+        now = datetime.utcnow()
+
+        exit_count = 0
+        weight_estimate = 0
+
+        for symbol, hdata in holdings.items():
+            if not isinstance(hdata, dict):
+                continue
+
+            try:
+                current_price = binance.get_current_price(symbol)
+                weight_estimate += 1
+            except Exception as exc:
+                _logger.warning(
+                    "Exit check: failed to fetch price for %s: %s", symbol, exc
+                )
+                continue
+
+            qty = Decimal(str(hdata.get("quantity", 0)))
+            entry_price = Decimal(str(hdata.get("avg_entry_price", 0)))
+            sl_price = Decimal(str(hdata.get("stop_loss_price", 0)))
+            tp_price = Decimal(str(hdata.get("take_profit_price", 0)))
+
+            if qty <= Decimal("0"):
+                continue
+
+            hit_sl = sl_price > Decimal("0") and current_price <= sl_price
+            hit_tp = tp_price > Decimal("0") and current_price >= tp_price
+
+            if not hit_sl and not hit_tp:
+                continue
+
+            reason = "stop loss" if hit_sl else "take profit"
+            pnl_pct = (
+                ((current_price - entry_price) / entry_price * 100)
+                if entry_price > 0
+                else Decimal("0")
+            )
+
+            auto_exit = ProposedTrade(
+                symbol=symbol,
+                side="SELL",
+                quantity=qty,
+                entry_price=entry_price,
+                stop_loss_price=sl_price,
+                take_profit_price=tp_price,
+                signal_confidence=1.0,
+                reasoning=(
+                    f"AUTO-EXIT: {reason} triggered at {float(current_price):.2f}"
+                ),
+                is_sentiment_driven=False,
+                is_auto_exit=True,
+                trade_origin="bot_auto_exit",
+            )
+
+            state_stub: AgentState = {
+                "timestamp": now,
+            }
+
+            executed = execution_agent._execute_trade(auto_exit, state_stub)
+            if executed is None:
+                continue
+
+            if executed.status == "FILLED":
+                exit_count += 1
+                weight_estimate += 10
+
+            cycle_id = f"exit-check-{uuid4()}"
+
+            with get_db() as db:
+                db.add(
+                    TradeModel(
+                        cycle_id=cycle_id,
+                        symbol=symbol,
+                        side="SELL",
+                        proposed_quantity=qty,
+                        executed_quantity=executed.executed_quantity,
+                        entry_price=entry_price,
+                        executed_price=executed.executed_price,
+                        stop_loss_price=sl_price,
+                        take_profit_price=tp_price,
+                        order_id=executed.order_id,
+                        status=executed.status,
+                        is_sentiment_driven=False,
+                        trade_origin="bot_auto_exit",
+                        signal_confidence=1.0,
+                        reasoning=(
+                            f"AUTO-EXIT: {reason} triggered at "
+                            f"{float(current_price):.2f}"
+                        ),
+                        pnl=executed.pnl,
+                        fee_paid=executed.fee_paid,
+                        created_at=now,
+                    )
+                )
+
+                position = (
+                    db.query(PositionModel)
+                    .filter(PositionModel.symbol == symbol)
+                    .first()
+                )
+                if position:
+                    position.quantity -= executed.executed_quantity
+                    if position.quantity <= Decimal("0"):
+                        db.delete(position)
+                        _logger.info(
+                            "Position fully closed (exit check): %s", symbol
+                        )
+                    else:
+                        position.updated_at = now
+                        _logger.info(
+                            "Position reduced (exit check): %s qty=%s",
+                            symbol, position.quantity,
+                        )
+                else:
+                    _logger.warning(
+                        "Exit check: SELL executed for %s but no open Position row found",
+                        symbol,
+                    )
+
+            _logger.info(
+                "AUTO-EXIT %s — %s triggered. "
+                "entry=%.2f exit=%.2f pnl=%.2f%% qty=%s",
+                symbol, reason,
+                float(entry_price), float(executed.executed_price),
+                float(pnl_pct), executed.executed_quantity,
+            )
+
+        _logger.info(
+            "Exit check rate-limit headroom — "
+            "estimated %d weight consumed this cycle. "
+            "Binance limit: 1200 weight/min. "
+            "At %d-min frequency, %d cycle(s)/hr with 5 positions + potential orders = "
+            "negligible impact.",
+            weight_estimate,
+            settings.EXIT_CHECK_INTERVAL_MINUTES,
+            60 // settings.EXIT_CHECK_INTERVAL_MINUTES,
+        )
+
+        if exit_count == 0:
+            _logger.info("No exit conditions triggered")
+        else:
+            _logger.info("Exit check: %d position(s) closed", exit_count)
+    except Exception:
+        _logger.exception("Exit check failed — full traceback below")
+    finally:
+        lock.release()
+        _logger.debug("Released exit-check lock")
+
+    _logger.info("=== EXIT CHECK DONE ===")
 
 
 def reconcile_positions() -> None:

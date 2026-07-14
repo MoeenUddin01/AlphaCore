@@ -68,5 +68,11 @@ class Settings(BaseSettings):
 
     ALERT_WEBHOOK_URL: str = ""
 
+    EXIT_CHECK_INTERVAL_MINUTES: int = 15
+    """How often the standalone exit-condition check runs (minutes).
+    This is independent of the full trading cycle (which stays at 1h).
+    Default: 15 minutes (4x per hour).
+    """
+
 
 settings = Settings()
