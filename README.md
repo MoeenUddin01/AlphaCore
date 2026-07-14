@@ -4,22 +4,25 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 
 > **Mode:** Paper trading (Binance Testnet) — safe for real-world deployment demo.  
 > **Target assets:** BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, ADA/USDT  
-> **Status:** Production live — 24/7 automated trading via local scheduler + Neon Postgres + Vercel dashboard
+> **Status:** Production live — 24/7 automated trading via local scheduler + Neon Postgres + Vercel dashboard  
+> **News sources:** CoinDesk RSS (active), CoinMarketCap Fear & Greed (active), Currents API (degraded — 400 error), CryptoPanic (dormant — 403), CryptoCompare (dormant — needs key), cryptocurrency.cv (dormant — 402)
 
 ---
 
 ## Features
 
-- **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (CoinDesk RSS), Fear & Greed Index
+- **Data Pipeline** — fetches OHLCV candles (Binance), market data (CoinGecko), news (6 sources: CoinDesk RSS, CoinMarketCap, Currents API, CryptoPanic, CryptoCompare, cryptocurrency.cv), Fear & Greed Index
+- **Multi-Source News** — `MultiSourceNewsClient` aggregates 3 active sources (CoinDesk RSS, CoinMarketCap, Currents API) with relevance filtering, dedup via SequenceMatcher ≥0.75, and per-source logging; 3 dormant sources documented for future activation
 - **Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMAs, returns, volatility via `pandas-ta`
 - **Two ML Models Per Symbol** — `LSTMModel` for price direction (2-class, ~50% acc — random) and `LSTMClassifier` for volatility regime (sigmoid, 76–89% test acc)
 - **Volatility Regime Prediction** — binary target from 4-candle price range vs 24-candle median; BCE loss, saves `_classifier_best.pt` checkpoints
-- **Sentiment Analysis** — FinBERT (ProsusAI/finbert) with **time-decay weighting** — fresher headlines contribute more via linear decay over 24h (10% floor); `avg_headline_age_hours` logged per headline batch
+- **Sentiment Analysis** — FinBERT (ProsusAI/finbert) with **exponential time-decay weighting** — `weight = 0.5^(age_hours / half_life_hours)` with `HALF_LIFE_HOURS=12.0`; headlines at 12h→50%, 24h→25%, 48h→6.25%; `avg_headline_age_hours` logged per headline batch
 - **Multi-Agent Pipeline** — 5-node LangGraph StateGraph: monitor_exits → Manager → Risk → Execution → monitor_update (auto-exits detected and executed in the same cycle)
-- **Manager Agent (Option A)** — sentiment-primary trading; side determined solely by `abs(sentiment_score)` thresholds (`>0.30 BUY`, `<-0.30 SELL`); position halved in high-volatility regime; **paused mode** check skips new entry proposals when flag file exists (auto-exits still processed)
+- **Manager Agent** — sentiment-primary trading; side determined by `abs(sentiment_score)` thresholds (`>0.30 BUY`, `<-0.30 SELL`); position halved in high-volatility regime; **holdings-aware filtering** skips BUY if symbol already held and SELL if no position exists; **paused mode** check skips new entry proposals when flag file exists (auto-exits still processed); pre-execution headline refresh via MultiSourceNewsClient
 - **Dual Position Caps** — percentage-based (5% of portfolio) AND absolute dollar cap ($500 USD) — `min()` protects against portfolio-value bugs
 - **Risk Management** — position sizing, concentration limits (≤20% per coin), total exposure caps (≤80%), drawdown circuit breaker (>15%), duplicate prevention, **correlation risk**, **SELL-without-holding guard** (spot-only safety)
 - **Auto-Exit Monitoring** — `PortfolioMonitor.check_exit_conditions()` checks every open position against SL/TP each cycle; generates `ProposedTrade` with `is_auto_exit=True` that bypasses all risk checks
+- **Trade Origin Tracking** — `trade_origin` column (`bot_sentiment`, `bot_auto_exit`, `manual`, `pre_tracking`) enables bot-only vs all-trades metric splitting in reporting
 - **Alert Webhook** — Discord/Telegram alerts on: drawdown >10%, ≥2 failed trades in a cycle, scheduler job exceptions, scheduler crashes
 - **Real Trading Fees** — `TRADING_FEE_PCT=0.001` (0.1%) deducted from realised P&L on both entry and exit legs; `fee_paid` persisted on `ExecutedTrade` and `Trade` DB table
 - **Idempotency Lock** — file-based `FileLock` on `data_cache/.trading_cycle.lock` (5s timeout) prevents double execution when scheduler fires overlapping cycles
@@ -28,11 +31,12 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **Paper Trading** — Binance Testnet integration with slippage modelling
 - **REST API** — FastAPI with 15+ endpoints for portfolio, trades, signals, health, sentiment validation, pause/resume
 - **Next.js Frontend** — dark-terminal themed dashboard with 6 pages: overview, wallet, signals, trades, risk, validation; live data via React Query polling (30s stale / 60s refetch); animated charts (Recharts, Framer Motion)
-- **Persistent Storage** — PostgreSQL (Neon.tech) via SQLAlchemy ORM (6 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid` columns on `Trade`
+- **Persistent Storage** — PostgreSQL (Neon.tech) via SQLAlchemy ORM (6 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid`, `trade_origin` columns on `Trade`
 - **Sentiment Validation** — win-rate color-coded metric, sample-size progress bar, win/loss sentiment comparison chart, statistical readiness gate (requires ≥30 trades)
 - **Decoupled Processes** — `--mode trade` runs scheduler only, `--mode api` runs API server only — separate OS processes sharing the same database; deploy on different machines or hosting platforms
 - **Scheduler** — APScheduler with 3 recurring jobs (trading cycle, cache refresh, health check) + one-shot model training on startup
 - **Training Data** — 2 years of 1h OHLCV via Binance Mainnet (read-only, no API key needed)
+- **CryptoPanic 403 Fast-Fail** — `RuntimeError` → `ValueError` on 403 response eliminates 9× retry waste per pair (3 retries × 3 nesting levels)
 - **Dockerized** — Docker Compose for one-command startup
 
 ---
@@ -47,7 +51,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 | Price model | LSTM (direction) + LSTMClassifier (volatility regime) |
 | Agent framework | LangGraph 0.2+ |
 | Crypto data | python-binance (Testnet + Mainnet read-only), CoinGecko API |
-| News/sentiment | CoinDesk RSS (free, no API key) |
+| News/sentiment | CoinDesk RSS, CoinMarketCap (Fear & Greed), Currents API, CryptoPanic, CryptoCompare, cryptocurrency.cv |
 | Feature engineering | pandas, numpy, pandas-ta |
 | Database | SQLAlchemy ORM, PostgreSQL (Neon.tech) |
 | API server | FastAPI + Uvicorn |
@@ -56,6 +60,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 | Package manager | uv (Python) / npm (frontend) |
 | Deployment | Docker + Docker Compose |
 | Logging | Python logging + rotating file handler |
+| Timestamp handling | `src/utils/timestamps.py` — normalises datetime, unix, ISO 8601, plain strings |
 
 ---
 
@@ -93,6 +98,10 @@ BINANCE_API_KEY=your_testnet_api_key
 BINANCE_API_SECRET=your_testnet_api_secret
 BINANCE_TESTNET=true
 COINGECKO_API_KEY=
+COINMARKETCAP_API_KEY=
+CURRENTS_API_KEY=
+CRYPTOPANIC_API_KEY=
+CRYPTOCOMPARE_API_KEY=
 DATABASE_URL=postgresql://user:pass@ep-xxx.us-east-2.aws.neon.tech/neondb?sslmode=require
 LOG_LEVEL=INFO
 PORTFOLIO_INITIAL_CAPITAL=10000
@@ -200,23 +209,23 @@ docker-compose up --build
 The system runs a closed-loop trading cycle every hour:
 
 ```
-DataPipeline         → fetch candles + news + market data
+DataPipeline         → fetch candles + news (MultiSourceNewsClient: CoinDesk RSS + CoinMarketCap + Currents) + market data
 FeatureEngineer      → compute indicators + volatility regime target
-Predictor            → LSTM direction (2-class) + LSTMClassifier vol regime (sigmoid) + FinBERT sentiment (time-decay weighted)
+Predictor            → LSTM direction (2-class) + LSTMClassifier vol regime (sigmoid) + FinBERT sentiment (exponential time-decay weighted, half-life=12h)
 Monitor (check exits)→ detect SL/TP breaches on open positions, propose auto-exit trades
-Manager Agent        → sentiment-primary: rank by |sentiment|, side from sentiment thresholds, apply USD + % position caps, skip if paused
+Manager Agent        → sentiment-primary: rank by |sentiment|, side from sentiment thresholds, holdings-aware filter (skip BUY if held / SELL if not held), apply USD + % position caps, skip if paused
 Risk Agent           → screen each proposed trade (7 checks: size, concentration, exposure, drawdown, duplicate, correlation, SELL-without-holding; auto-exit bypasses all)
-Execution Agent      → validate LOT_SIZE + MIN_NOTIONAL, round qty down to step size, fire orders to Binance Testnet, record fee_paid
+Execution Agent      → validate LOT_SIZE + MIN_NOTIONAL, round qty down to step size, fire orders to Binance Testnet, record fee_paid, set trade_origin
 Monitor (update)     → update P&L, persist positions to DB, compute portfolio state
 CRUD / Database      → persist everything to PostgreSQL (Neon.tech)
 ```
 
 ### Agent Roles
 
-- **Manager Agent** — sentiment-primary trading; ranks signals by `|sentiment_score|`, side from thresholds (`>0.30 BUY`, `<-0.30 SELL`); applies dual position caps: `min(portfolio_pct_qty, usd_cap_qty)`; preserves auto-exit trades from monitor_exits; checks pause flag at start of `run()` — skips new entries when paused, allows auto-exits through
+- **Manager Agent** — sentiment-primary trading; ranks signals by `|sentiment_score|`, side from thresholds (`>0.30 BUY`, `<-0.30 SELL`); applies dual position caps: `min(portfolio_pct_qty, usd_cap_qty)`; **holdings-aware filtering** skips BUY if symbol already held and SELL if no position exists (spot cannot short); preserves auto-exit trades from monitor_exits; checks pause flag at start of `run()` — skips new entries when paused, allows auto-exits through; pre-execution headline refresh via `MultiSourceNewsClient`
 - **Risk Agent** — 7 independent checks: position size (≤5%), concentration (≤20% per coin), exposure (≤80%), drawdown (>15% halts), duplicate prevention, correlation risk (≥3 same-direction halves, ≥4 rejects), **SELL-without-holding guard** (rejects sell when no position held); trades with `is_auto_exit=True` bypass all checks
 - **Execution Agent** — fetches live price, fetches symbol filters (LOT_SIZE stepSize, MIN_NOTIONAL), rounds quantity **down** to step size (never up, never exceeds), validates notional ≥ MIN_NOTIONAL, returns `REJECTED_LOT_SIZE` status for invalid orders; models random slippage (0–0.15%), calculates `fee_paid = qty × price × TRADING_FEE_PCT`, routes market orders to Binance Testnet
-- **Portfolio Monitor** — two-stage: `check_exit_conditions()` (first) iterates open positions, queries SL/TP from DB, proposes auto-exits; `run()` (last) updates **fee-aware realised P&L** per filled trade, persists positions to DB (`query-then-update-or-insert`), computes total portfolio value and drawdown from peak
+- **Portfolio Monitor** — two-stage: `check_exit_conditions()` (first) iterates open positions, queries SL/TP from DB, proposes auto-exits; `run()` (last) updates **fee-aware realised P&L** per filled trade, persists positions to DB (`query-then-update-or-insert`), computes total portfolio value and drawdown from peak; `trade_origin` set to `bot_auto_exit` on auto-exits, `bot_sentiment` on sentiment entries
 
 ---
 
@@ -227,11 +236,13 @@ Live paper-trading since June 23, 2026 on Binance Testnet:
 | Metric | Value |
 |--------|-------|
 | Initial capital | $10,000 |
-| Current portfolio | ~$12,173 |
-| Gross return | +21.7% |
-| Peak value | $12,239 |
-| Current drawdown | −0.54% from peak |
-| Trades executed | 13 filled |
+| Current portfolio | ~$12,761 |
+| Gross return | +27.6% |
+| Peak value | $12,762 |
+| Current drawdown | 0.00% from peak |
+| Sentiment-driven trades | 17 tracked (57.1% win rate, +$11.57 PnL) |
+| Bot-only trades | 10 SELLs (50.0% win rate, +$3.34 PnL) |
+| All trades closed | 14 (7W/7L, avg win +$6.70, avg loss -$4.92, R:R 1.36:1) |
 | Direction accuracy | ~50% (random — LSTM adds no alpha) |
 | Volatility accuracy | 76–89% (useful for regime awareness) |
 
@@ -247,7 +258,7 @@ Six SQLAlchemy ORM tables on PostgreSQL (Neon.tech):
 |---|---|---|
 | `cycle_runs` | `cycle_id` (UUID), signals/proposed/approved/executed counts, portfolio value, P&L, drawdown, `cycle_log` (JSON) |
 | `signals` | FK → `cycle_runs.cycle_id`, symbol, predicted return, direction, confidence, sentiment score/label, Fear & Greed |
-| `trades` | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed quantity + price, stop-loss, take-profit, status, PnL, `is_sentiment_driven` (Boolean), `signal_confidence` (Numeric), `fee_paid` (Numeric) |
+| `trades` | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed quantity + price, stop-loss, take-profit, status, PnL, `is_sentiment_driven` (Boolean), `signal_confidence` (Numeric), `fee_paid` (Numeric), `trade_origin` (VARCHAR: `bot_sentiment`, `bot_auto_exit`, `manual`, `pre_tracking`) |
 | `positions` | `symbol` (unique), quantity, avg entry price, current price, unrealised PnL |
 | `portfolio_snapshots` | FK → `cycle_runs.cycle_id`, total value, cash, positions value, P&L, peak value, drawdown |
 | `portfolio_state` | Singleton row, holdings JSON, last updated timestamp |
@@ -275,7 +286,16 @@ AlphaCore/
 │   ├── data/                  # Data fetching & feature engineering
 │   │   ├── binance_client.py
 │   │   ├── coingecko_client.py
-│   │   ├── rss_news_client.py # CoinDesk RSS (free, no API key)
+│   │   ├── rss_news_client.py     # CoinDesk RSS (free, no API key)
+│   │   ├── coinmarketcap_client.py # Fear & Greed + Global Metrics
+│   │   ├── currents_client.py     # Currents API news (degraded — 400)
+│   │   ├── cryptopanic_client.py  # CryptoPanic news (dormant — 403)
+│   │   ├── cryptocompare_client.py# CryptoCompare news (dormant — needs key)
+│   │   ├── cryptocurrency_cv_client.py # cryptocurrency.cv (dormant — 402)
+│   │   ├── gnews_client.py        # GNews API (dormant — 12h delay)
+│   │   ├── multi_source_news.py   # Aggregator: 3 active, 3 dormant
+│   │   ├── reddit_client.py
+│   │   ├── yahoo_client.py
 │   │   ├── feature_engineer.py
 │   │   └── data_pipeline.py
 │   ├── models/                # ML models
@@ -320,7 +340,8 @@ AlphaCore/
 │   └── utils/                 # Config, logging, helpers
 │       ├── config.py
 │       ├── logger.py
-│       └── helpers.py
+│       ├── helpers.py
+│       └── timestamps.py      # datetime/unix/ISO 8601 normalisation
 │
 ├── models_saved/              # Trained model checkpoints ({sym}_lstm_best.pt, {sym}_classifier_best.pt)
 ├── artifacts/                 # Scaler params + training config + per-symbol metrics JSON
@@ -358,6 +379,11 @@ AlphaCore/
 | Phase 14 | Position decrement on SELL fix, wallet endpoint + frontend wallet page | ✅ Complete |
 | Phase 15 | Cycle integrity validation, position reconciliation, auto-pause on drawdown | ✅ Complete |
 | Phase 16 | Cash-from-trades fix (W01/W02), dynamic portfolio value | ✅ Complete |
+| Phase 17 | Multi-source news client (Currents, GNews, CryptoPanic, CryptoCompare, CoinMarketCap, cryptocurrency.cv) | ✅ Complete |
+| Phase 18 | Exponential decay sentiment weighting (half-life 12h) + shared timestamp normalisation | ✅ Complete |
+| Phase 19 | Trade origin tracking (`bot_sentiment`, `bot_auto_exit`, `manual`, `pre_tracking`) | ✅ Complete |
+| Phase 20 | Holdings-aware signal filtering (skip BUY if held, skip SELL if not held) | ✅ Complete |
+| Phase 21 | CryptoPanic 403 fast-fail (ValueError → 0 retries instead of RuntimeError → 9 retries) | ✅ Complete |
 
 ---
 
