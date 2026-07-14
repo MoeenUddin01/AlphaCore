@@ -5,7 +5,7 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 > **Mode:** Paper trading (Binance Testnet) — safe for real-world deployment demo.  
 > **Target assets:** BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, ADA/USDT  
 > **Status:** Production live — 24/7 automated trading via local scheduler + Neon Postgres + Vercel dashboard  
-> **News sources:** CoinDesk RSS (active), CoinMarketCap Fear & Greed (active), Currents API (degraded — 400 error), CryptoPanic (dormant — 403), CryptoCompare (dormant — needs key), cryptocurrency.cv (dormant — 402)
+> **News sources:** CoinDesk RSS (active), CoinMarketCap Fear & Greed (active), Currents API (active), CryptoPanic (dormant — 403), CryptoCompare (dormant — needs key), cryptocurrency.cv (dormant — 402)
 
 ---
 
@@ -288,7 +288,7 @@ AlphaCore/
 │   │   ├── coingecko_client.py
 │   │   ├── rss_news_client.py     # CoinDesk RSS (free, no API key)
 │   │   ├── coinmarketcap_client.py # Fear & Greed + Global Metrics
-│   │   ├── currents_client.py     # Currents API news (degraded — 400)
+│   │   ├── currents_client.py     # Currents API news (active)
 │   │   ├── cryptopanic_client.py  # CryptoPanic news (dormant — 403)
 │   │   ├── cryptocompare_client.py# CryptoCompare news (dormant — needs key)
 │   │   ├── cryptocurrency_cv_client.py # cryptocurrency.cv (dormant — 402)

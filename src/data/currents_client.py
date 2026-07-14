@@ -104,7 +104,7 @@ class CurrentsClient:
         params = {
             "keywords": keyword,
             "language": "en",
-            "page_size": min(limit, 40),
+            "page_size": min(limit, 20),
             "apiKey": self._api_key,
         }
 
