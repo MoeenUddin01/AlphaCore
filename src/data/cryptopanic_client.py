@@ -69,6 +69,8 @@ class CryptoPanicClient:
             resp.raise_for_status()
             data = resp.json()
         except requests.RequestException as exc:
+            if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None and exc.response.status_code == 403:
+                raise ValueError(f"CryptoPanic API 403 Forbidden (key invalid/expired)") from exc
             raise RuntimeError(f"CryptoPanic API request failed: {exc}") from exc
 
         results = data.get("results", [])

@@ -49,11 +49,12 @@ class ManagerAgent:
         """
         _logger.info("ManagerAgent run — cycle %s", state["cycle_id"])
 
-        trading_pairs = list(state["pipeline_data"].keys())
-        fresh_headlines = self.predictor.refresh_sentiment(trading_pairs)
-        for pair, headlines in fresh_headlines.items():
-            if pair in state["pipeline_data"]:
-                state["pipeline_data"][pair]["news"] = headlines
+        from src.data.multi_source_news import MultiSourceNewsClient
+        news_client = MultiSourceNewsClient()
+        for pair in list(state["pipeline_data"].keys()):
+            fresh = news_client.fetch_headlines(pair, limit_per_source=15)
+            if fresh:
+                state["pipeline_data"][pair]["news"] = fresh
 
         raw_signals = self.predictor.run_all(state["pipeline_data"])
 
@@ -190,6 +191,29 @@ class ManagerAgent:
             side = "SELL"
         else:
             _logger.info("Skipping %s: sentiment=%.2f — no clear direction", sig.symbol, sentiment_score)
+            return None
+
+        holdings_raw = state.get("portfolio_summary", {}).get("holdings", {})
+        holdings_symbols: set[str] = set()
+        if isinstance(holdings_raw, dict):
+            holdings_symbols = {
+                sym for sym, hdata in holdings_raw.items()
+                if isinstance(hdata, dict) and float(hdata.get("quantity", 0)) > 0
+            }
+
+        if side == "BUY" and sig.symbol in holdings_symbols:
+            _logger.info(
+                "Skipping %s BUY — position already held (%.2f). Preventing duplicate.",
+                sig.symbol,
+                float(holdings_raw[sig.symbol].get("quantity", 0)),
+            )
+            return None
+
+        if side == "SELL" and sig.symbol not in holdings_symbols:
+            _logger.info(
+                "Skipping %s SELL — no existing holding. Spot trading cannot short.",
+                sig.symbol,
+            )
             return None
 
         pair_data = state["pipeline_data"].get(sig.symbol, {})
