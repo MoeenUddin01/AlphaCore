@@ -62,6 +62,10 @@ def init_db() -> None:
         PortfolioSnapshot,
         PortfolioState,
         Position,
+        RealPosition,
+        RealPortfolioSnapshot,
+        RealPortfolioState,
+        RealTrade,
         Signal,
         Trade,
     )

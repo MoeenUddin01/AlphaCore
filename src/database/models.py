@@ -143,3 +143,86 @@ class PortfolioSnapshot(Base):
     peak_value = Column(Numeric(20, 8), nullable=False)
     drawdown_pct = Column(Numeric(10, 4), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+# =============================================================================
+# Real Trading Tables — structurally separate from test/paper tables
+# All table names prefixed with "real_" so queries against test tables
+# can never touch real data, and vice versa.
+# =============================================================================
+
+
+class RealTrade(Base):
+    """Real-money trade record — isolated from paper/test trades.
+
+    One row per proposed or executed real-money trade.  Structurally
+    identical to ``Trade`` but lives in a separate table so that a
+    bug or bad query in the test system can never touch real data.
+    """
+
+    __tablename__ = "real_trades"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    sync_id = Column(String(36), nullable=False, index=True)
+    symbol = Column(String(20), nullable=False)
+    side = Column(String(4), nullable=False)
+    executed_quantity = Column(Numeric(20, 8), nullable=True)
+    executed_price = Column(Numeric(20, 8), nullable=True)
+    order_id = Column(String(50), nullable=True)
+    status = Column(String(20), nullable=False, default="synced")
+    pnl = Column(Numeric(20, 8), nullable=True)
+    fee_paid = Column(Numeric(20, 8), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class RealPosition(Base):
+    """Real-money live position — isolated from paper/test positions.
+
+    One row per actively held symbol in the real Binance account.
+    Updated on every account-sync cycle.
+    """
+
+    __tablename__ = "real_positions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    symbol = Column(String(20), unique=True, nullable=False)
+    quantity = Column(Numeric(20, 8), nullable=False)
+    avg_entry_price = Column(Numeric(20, 8), nullable=False)
+    current_price = Column(Numeric(20, 8), nullable=False)
+    unrealised_pnl = Column(Numeric(20, 8), nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class RealPortfolioSnapshot(Base):
+    """Point-in-time real-portfolio state.
+
+    Captured at the end of each account-sync cycle.  Tracks total
+    value, cash, positions value, and P&L for the real-money account.
+    """
+
+    __tablename__ = "real_portfolio_snapshots"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    sync_id = Column(String(36), nullable=False, index=True)
+    total_value = Column(Numeric(20, 8), nullable=False)
+    cash = Column(Numeric(20, 8), nullable=False)
+    positions_value = Column(Numeric(20, 8), nullable=False)
+    unrealised_pnl = Column(Numeric(20, 8), nullable=False)
+    realised_pnl = Column(Numeric(20, 8), nullable=False)
+    peak_value = Column(Numeric(20, 8), nullable=False)
+    drawdown_pct = Column(Numeric(10, 4), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class RealPortfolioState(Base):
+    """Singleton tracking real-portfolio peak value for drawdown.
+
+    Only one row exists (id='singleton').  Structurally isolated from
+    the paper-trading ``PortfolioState`` table.
+    """
+
+    __tablename__ = "real_portfolio_state"
+
+    id = Column(String(20), primary_key=True, default="singleton")
+    peak_value = Column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)

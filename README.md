@@ -31,12 +31,13 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **Paper Trading** — Binance Testnet integration with slippage modelling
 - **REST API** — FastAPI with 15+ endpoints for portfolio, trades, signals, health, sentiment validation, pause/resume
 - **Next.js Frontend** — dark-terminal themed dashboard with 6 pages: overview, wallet, signals, trades, risk, validation; live data via React Query polling (30s stale / 60s refetch); animated charts (Recharts, Framer Motion)
-- **Persistent Storage** — PostgreSQL (Neon.tech) via SQLAlchemy ORM (6 tables) with `is_sentiment_driven`, `signal_confidence`, `fee_paid`, `trade_origin` columns on `Trade`
+- **Persistent Storage** — PostgreSQL (Neon.tech) via SQLAlchemy ORM (10 tables: 6 paper-test + 4 real) with `is_sentiment_driven`, `signal_confidence`, `fee_paid`, `trade_origin` columns on `Trade`
 - **Sentiment Validation** — win-rate color-coded metric, sample-size progress bar, win/loss sentiment comparison chart, statistical readiness gate (requires ≥30 trades)
 - **Decoupled Processes** — `--mode trade` runs scheduler only, `--mode api` runs API server only — separate OS processes sharing the same database; deploy on different machines or hosting platforms
 - **Scheduler** — APScheduler with 3 recurring jobs (trading cycle, cache refresh, health check) + one-shot model training on startup
 - **Training Data** — 2 years of 1h OHLCV via Binance Mainnet (read-only, no API key needed)
 - **CryptoPanic 403 Fast-Fail** — `RuntimeError` → `ValueError` on 403 response eliminates 9× retry waste per pair (3 retries × 3 nesting levels)
+- **Real-Money Infrastructure (read-only)** — `main_real.py` runs as a completely separate process with isolated `real_*` database tables, its own Binance API credentials (read-only key), and zero impact on the paper-test system. Account-sync job pulls live balances/positions from the real Binance account every hour. **No order placement in this phase.**
 - **Dockerized** — Docker Compose for one-command startup
 
 ---
@@ -137,6 +138,20 @@ python main.py --mode dashboard
 ```
 
 The default mode is `trade` — just `python main.py` starts the full system.
+
+### Real-Money Infrastructure (Isolated)
+
+A completely separate entry point with its own database tables and credentials:
+
+```bash
+# Run one read-only account-sync cycle (pull balances, write to real_* tables)
+python main_real.py --mode sync
+
+# Start the recurring account-sync daemon (every 1h)
+python main_real.py --mode daemon
+```
+
+> **Read-only guarantee:** No order placement is implemented. The Binance API key should be created with read-only permissions only.
 
 ### Explore the API
 
@@ -252,16 +267,22 @@ Live paper-trading since June 23, 2026 on Binance Testnet:
 
 ## Database Schema
 
-Six SQLAlchemy ORM tables on PostgreSQL (Neon.tech):
+Ten SQLAlchemy ORM tables on PostgreSQL (Neon.tech) — 6 paper-test + 4 real:
 
-| Table | Key Columns |
+| Table | Domain | Key Columns |
 |---|---|---|
-| `cycle_runs` | `cycle_id` (UUID), signals/proposed/approved/executed counts, portfolio value, P&L, drawdown, `cycle_log` (JSON) |
-| `signals` | FK → `cycle_runs.cycle_id`, symbol, predicted return, direction, confidence, sentiment score/label, Fear & Greed |
-| `trades` | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed quantity + price, stop-loss, take-profit, status, PnL, `is_sentiment_driven` (Boolean), `signal_confidence` (Numeric), `fee_paid` (Numeric), `trade_origin` (VARCHAR: `bot_sentiment`, `bot_auto_exit`, `manual`, `pre_tracking`) |
-| `positions` | `symbol` (unique), quantity, avg entry price, current price, unrealised PnL |
-| `portfolio_snapshots` | FK → `cycle_runs.cycle_id`, total value, cash, positions value, P&L, peak value, drawdown |
-| `portfolio_state` | Singleton row, holdings JSON, last updated timestamp |
+| `cycle_runs` | Test | `cycle_id` (UUID), signals/proposed/approved/executed counts, portfolio value, P&L, drawdown |
+| `signals` | Test | FK → `cycle_runs.cycle_id`, symbol, predicted return, direction, confidence, sentiment score/label, Fear & Greed |
+| `trades` | Test | FK → `cycle_runs.cycle_id`, symbol, side, proposed/executed qty + price, SL/TP, status, PnL, `trade_origin` |
+| `positions` | Test | `symbol` (unique), quantity, avg entry price, current price, unrealised PnL |
+| `portfolio_snapshots` | Test | FK → `cycle_runs.cycle_id`, total value, cash, positions value, P&L, peak value, drawdown |
+| `portfolio_state` | Test | Singleton row, peak value, validation start date |
+| `real_trades` | **Real** | `sync_id`, symbol, side, executed qty/price, order_id, status, PnL, fee |
+| `real_positions` | **Real** | `symbol` (unique), quantity, avg entry price, current price, unrealised PnL |
+| `real_portfolio_snapshots` | **Real** | `sync_id`, total value, cash, positions value, P&L, peak value, drawdown |
+| `real_portfolio_state` | **Real** | Singleton row, peak value |
+
+> Real tables are structurally separate — queries against test tables can never touch real data.
 
 ---
 
@@ -274,7 +295,8 @@ AlphaCore/
 ├── .env.example
 ├── .gitignore
 ├── pyproject.toml             # Dependencies (uv/pip)
-├── main.py                    # Single entry point (4 modes)
+├── main.py                    # Paper-test entry point (4 modes)
+├── main_real.py               # Real-money infrastructure (isolated, read-only)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── frontend/                  # Next.js 16 dashboard
@@ -285,6 +307,7 @@ AlphaCore/
 ├── src/
 │   ├── data/                  # Data fetching & feature engineering
 │   │   ├── binance_client.py
+│   │   ├── binance_real_client.py # Read-only real-account client (no trade capability)
 │   │   ├── coingecko_client.py
 │   │   ├── rss_news_client.py     # CoinDesk RSS (free, no API key)
 │   │   ├── coinmarketcap_client.py # Fear & Greed + Global Metrics
@@ -314,7 +337,8 @@ AlphaCore/
 │   ├── database/              # SQLAlchemy ORM & CRUD
 │   │   ├── connection.py
 │   │   ├── models.py
-│   │   └── crud.py
+│   │   ├── crud.py
+│   │   └── real_crud.py       # Real-trading CRUD (isolated from test data)
 │   ├── api/                   # FastAPI REST endpoints
 │   │   ├── main.py
 │   │   ├── schemas.py
@@ -384,6 +408,7 @@ AlphaCore/
 | Phase 19 | Trade origin tracking (`bot_sentiment`, `bot_auto_exit`, `manual`, `pre_tracking`) | ✅ Complete |
 | Phase 20 | Holdings-aware signal filtering (skip BUY if held, skip SELL if not held) | ✅ Complete |
 | Phase 21 | CryptoPanic 403 fast-fail (ValueError → 0 retries instead of RuntimeError → 9 retries) | ✅ Complete |
+| Phase 22 | Real-money infrastructure: isolated `real_*` tables, read-only Binance client, separate `main_real.py` entry point, `--mode sync`/`daemon` | ✅ Complete |
 
 ---
 

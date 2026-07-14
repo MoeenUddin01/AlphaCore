@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     BINANCE_API_SECRET: str
     BINANCE_TESTNET: bool = True
 
+    BINANCE_REAL_API_KEY: str = ""
+    BINANCE_REAL_API_SECRET: str = ""
+    BINANCE_REAL_ENABLED: bool = False
+
     CRYPTOPANIC_API_KEY: str
     COINGECKO_API_KEY: str = ""
     CRYPTOCOMPARE_API_KEY: str = ""
