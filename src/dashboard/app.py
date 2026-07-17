@@ -12,6 +12,11 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from src.dashboard.pages.overview import render as render_overview
+from src.dashboard.pages.real_performance import render as render_real_performance
+from src.dashboard.pages.real_positions import render as render_real_positions
+from src.dashboard.pages.real_risk import render as render_real_risk
+from src.dashboard.pages.real_signals import render as render_real_signals
+from src.dashboard.pages.real_wallet import render as render_real_wallet
 from src.dashboard.pages.risk import render as render_risk
 from src.dashboard.pages.signals import render as render_signals
 from src.dashboard.pages.trades import render as render_trades
@@ -45,7 +50,19 @@ def main() -> None:
 
     page = st.sidebar.selectbox(
         "Navigate",
-        ["Overview", "ML Signals", "Trade History", "Risk Dashboard", "Validation"],
+        [
+            "Overview",
+            "ML Signals",
+            "Trade History",
+            "Risk Dashboard",
+            "Validation",
+            "═══ REAL MONEY ═══",
+            "REAL — Positions",
+            "REAL — Portfolio/Wallet",
+            "REAL — Signals",
+            "REAL — Performance",
+            "REAL — Risk",
+        ],
     )
 
     st.sidebar.divider()
@@ -91,6 +108,31 @@ def main() -> None:
             render_risk()
         elif page == "Validation":
             render_validation()
+        elif page == "═══ REAL MONEY ═══":
+            st.title("REAL — Live Money Account")
+            st.markdown(
+                "<div style='background: linear-gradient(90deg, #8b0000, #cc0000, #8b0000); "
+                "color: white; padding: 20px; border-radius: 8px; text-align: center; "
+                "font-weight: bold; font-size: 20px; border: 2px solid #ff4444;'>"
+                "⚠  REAL — LIVE MONEY  ⚠"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            st.info(
+                "Select a REAL sub-tab from the sidebar to view positions, "
+                "portfolio, performance, or risk metrics from the real Binance account.\n\n"
+                "**The real account is currently READ-ONLY.** No trades are placed."
+            )
+        elif page == "REAL — Positions":
+            render_real_positions()
+        elif page == "REAL — Portfolio/Wallet":
+            render_real_wallet()
+        elif page == "REAL — Signals":
+            render_real_signals()
+        elif page == "REAL — Performance":
+            render_real_performance()
+        elif page == "REAL — Risk":
+            render_real_risk()
     except Exception:
         st.exception("An unhandled error occurred on this page.")
 

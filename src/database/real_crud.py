@@ -145,3 +145,45 @@ def get_real_positions() -> list[RealPosition]:
     """
     with get_db() as db:
         return db.query(RealPosition).all()
+
+
+def get_real_portfolio_history(limit: int = 100) -> list[RealPortfolioSnapshot]:
+    """Fetch recent real-portfolio snapshots.
+
+    Args:
+        limit: Maximum number of snapshots to return.
+
+    Returns:
+        List of ``RealPortfolioSnapshot`` rows ordered by ``created_at`` descending.
+    """
+    from sqlalchemy import desc
+
+    with get_db() as db:
+        return (
+            db.query(RealPortfolioSnapshot)
+            .order_by(desc(RealPortfolioSnapshot.created_at))
+            .limit(limit)
+            .all()
+        )
+
+
+def get_real_trade_history(
+    symbol: str | None = None,
+    limit: int = 50,
+) -> list[RealTrade]:
+    """Fetch recent real-money trades.
+
+    Args:
+        symbol: Optional trading pair filter.
+        limit: Maximum number of trades to return.
+
+    Returns:
+        List of ``RealTrade`` rows ordered by ``created_at`` descending.
+    """
+    from sqlalchemy import desc
+
+    with get_db() as db:
+        query = db.query(RealTrade).order_by(desc(RealTrade.created_at))
+        if symbol is not None:
+            query = query.filter(RealTrade.symbol == symbol)
+        return query.limit(limit).all()

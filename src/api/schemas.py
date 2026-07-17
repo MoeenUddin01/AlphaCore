@@ -159,3 +159,56 @@ class HealthResponse(BaseModel):
     version: str
 
     model_config: Any = ConfigDict(from_attributes=True)
+
+
+# =============================================================================
+# Real Trading Schemas — isolated from paper/test data
+# =============================================================================
+
+
+class RealTradeResponse(BaseModel):
+    """A real-money trade record synced from the Binance account."""
+
+    id: str
+    sync_id: str
+    symbol: str
+    side: str
+    executed_quantity: float | None
+    executed_price: float | None
+    order_id: str | None
+    status: str
+    pnl: float | None
+    fee_paid: float | None
+    created_at: datetime
+
+    model_config: Any = ConfigDict(from_attributes=True)
+
+
+class RealPositionResponse(BaseModel):
+    """An open position in the real-money account."""
+
+    symbol: str
+    quantity: float
+    avg_entry_price: float
+    current_price: float
+    unrealised_pnl: float
+    updated_at: datetime
+
+    model_config: Any = ConfigDict(from_attributes=True)
+
+
+class RealPortfolioSnapshotResponse(BaseModel):
+    """Point-in-time real-portfolio state captured at account sync."""
+
+    id: str
+    sync_id: str
+    total_value: float
+    cash: float
+    positions_value: float
+    unrealised_pnl: float
+    realised_pnl: float
+    peak_value: float
+    drawdown_pct: float
+    created_at: datetime
+
+    model_config: Any = ConfigDict(from_attributes=True)
