@@ -11,6 +11,7 @@ VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 LOG_DIR="$PROJECT_DIR/logs"
 API_LOG="$LOG_DIR/api.log"
 SCHED_LOG="$LOG_DIR/scheduler.log"
+SYNC_LOG="$LOG_DIR/sync.log"
 NGROK_LOG="$LOG_DIR/ngrok.log"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') === AlphaCore auto-start ==="
@@ -18,6 +19,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') === AlphaCore auto-start ==="
 # Kill any existing processes
 pkill -f "main.py --mode api" 2>/dev/null || true
 pkill -f "main.py --mode trade" 2>/dev/null || true
+pkill -f "main_real.py" 2>/dev/null || true
 pkill -f "ngrok http" 2>/dev/null || true
 sleep 2
 
@@ -52,6 +54,12 @@ echo "Starting scheduler..."
 cd "$PROJECT_DIR"
 setsid "$VENV_PYTHON" main.py --mode trade >> "$SCHED_LOG" 2>&1 &
 echo "Scheduler PID: $!"
+
+# Start real-account sync daemon
+echo "Starting real account sync daemon..."
+cd "$PROJECT_DIR"
+setsid "$VENV_PYTHON" main_real.py --mode daemon >> "$SYNC_LOG" 2>&1 &
+echo "Sync PID: $!"
 
 # Start ngrok
 echo "Starting ngrok tunnel..."

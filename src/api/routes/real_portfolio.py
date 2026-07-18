@@ -6,12 +6,11 @@ never touching paper/test data.
 """
 
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import desc
+from sqlalchemy import desc as sa_desc
 
 from src.api.schemas import RealPortfolioSnapshotResponse, RealPositionResponse
 from src.database.connection import get_db
 from src.database.models import RealPortfolioSnapshot, RealPosition
-from src.database.real_crud import get_real_latest_snapshot, get_real_positions
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -28,10 +27,11 @@ router = APIRouter(prefix="/real/portfolio", tags=["real-portfolio"])
 def real_latest_snapshot() -> RealPortfolioSnapshotResponse | None:
     _logger.info("GET /real/portfolio/latest")
     try:
-        snap = get_real_latest_snapshot()
-        if snap is None:
-            return None
-        return RealPortfolioSnapshotResponse.model_validate(snap)
+        with get_db() as db:
+            snap = db.query(RealPortfolioSnapshot).order_by(sa_desc(RealPortfolioSnapshot.created_at)).first()
+            if snap is None:
+                return None
+            return RealPortfolioSnapshotResponse.model_validate(snap)
     except Exception:
         _logger.exception("GET /real/portfolio/latest failed")
         raise HTTPException(status_code=500, detail="Failed to fetch real portfolio snapshot")
@@ -46,8 +46,9 @@ def real_latest_snapshot() -> RealPortfolioSnapshotResponse | None:
 def real_list_positions() -> list[RealPositionResponse]:
     _logger.info("GET /real/portfolio/positions")
     try:
-        positions = get_real_positions()
-        return [RealPositionResponse.model_validate(p) for p in positions]
+        with get_db() as db:
+            positions = db.query(RealPosition).filter(RealPosition.quantity > 0).all()
+            return [RealPositionResponse.model_validate(p) for p in positions]
     except Exception:
         _logger.exception("GET /real/portfolio/positions failed")
         raise HTTPException(status_code=500, detail="Failed to fetch real positions")

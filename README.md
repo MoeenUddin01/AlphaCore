@@ -38,6 +38,8 @@ A production-grade, multi-agent AI system that predicts cryptocurrency prices us
 - **Training Data** — 2 years of 1h OHLCV via Binance Mainnet (read-only, no API key needed)
 - **CryptoPanic 403 Fast-Fail** — `RuntimeError` → `ValueError` on 403 response eliminates 9× retry waste per pair (3 retries × 3 nesting levels)
 - **Real-Money Infrastructure (read-only)** — `main_real.py` runs as a completely separate process with isolated `real_*` database tables, its own Binance API credentials (read-only key), and zero impact on the paper-test system. Account-sync job pulls live balances/positions from the real Binance account every hour. **No order placement in this phase.**
+- **Real-Money Safety Controls** — kill-switch API (`/real/safety/toggle` + `/real/safety/status`) with daily loss limit, max position cap, and trades-per-day limit enforced via `real_safety_check()`; dedicated `real_kill_switch` DB table with confirm-word toggle
+- **Real-Money Dashboard Pages** — three Next.js pages under `/real` (Safety Controls, Positions, Portfolio/Wallet) accessible from the sidebar's REAL section alongside the existing DEMO section
 - **Dockerized** — Docker Compose for one-command startup
 
 ---
@@ -121,7 +123,9 @@ ALERT_WEBHOOK_URL=
 
 ## System Modes
 
-AlphaCore provides a single entry point with four modes:
+### Paper-Testing Entry Point
+
+AlphaCore's paper-test entry point provides four modes:
 
 ```bash
 # Scheduler only — runs trading cycles (no API server, no uvicorn)
@@ -203,6 +207,12 @@ docker-compose up --build
 | `GET` | `/signals/latest` | Signals from most recent cycle |
 | `GET` | `/signals/history` | Historical signals |
 | `GET` | `/signals/summary` | Daily signal summary |
+| `GET` | `/real/safety/status` | Real-account kill-switch status + limits |
+| `POST` | `/real/safety/toggle` | Toggle real-account trading (requires `CONFIRM` word) |
+| `GET` | `/real/portfolio/latest` | Real-account latest portfolio snapshot |
+| `GET` | `/real/portfolio/positions` | Real-account open positions |
+| `GET` | `/real/portfolio/history` | Real-account portfolio snapshot history |
+| `GET` | `/real/trades/history` | Real-account trade history |
 
 ---
 
@@ -216,6 +226,9 @@ docker-compose up --build
 | **Trades** | `/trades` | Symbol + status filterable table, KPI row (total trades, win rate, P&L), KPI badges per status badge |
 | **Risk** | `/risk` | VaR progress, concentration, exposure, drawdown cards with tiered colors; drawdown area chart, risk alerts |
 | **Validation** | `/validation` | Win rate metric with color threshold bar, avg win/loss, sample progress bar, sentiment conviction bar chart |
+| **Real: Controls** | `/real` | Kill-switch toggle (CONFIRM word), max position / daily loss / trades-per-day limits |
+| **Real: Positions** | `/real/positions` | Real-account open positions table with current prices |
+| **Real: Wallet** | `/real/wallet` | Real-account portfolio snapshot, cash balance, holdings |
 
 ---
 
@@ -338,14 +351,18 @@ AlphaCore/
 │   │   ├── connection.py
 │   │   ├── models.py
 │   │   ├── crud.py
-│   │   └── real_crud.py       # Real-trading CRUD (isolated from test data)
+│   │   ├── real_crud.py       # Real-trading CRUD (isolated from test data)
+│   │   └── real_safety.py     # Kill-switch + safety limits for real-money
 │   ├── api/                   # FastAPI REST endpoints
 │   │   ├── main.py
 │   │   ├── schemas.py
 │   │   └── routes/
 │   │       ├── portfolio.py
 │   │       ├── trades.py
-│   │       └── signals.py
+│   │       ├── signals.py
+│   │       ├── real_portfolio.py
+│   │       ├── real_trades.py
+│   │       └── real_safety.py
 │   ├── dashboard/             # Streamlit UI
 │   │   ├── app.py
 │   │   ├── components/
@@ -409,6 +426,8 @@ AlphaCore/
 | Phase 20 | Holdings-aware signal filtering (skip BUY if held, skip SELL if not held) | ✅ Complete |
 | Phase 21 | CryptoPanic 403 fast-fail (ValueError → 0 retries instead of RuntimeError → 9 retries) | ✅ Complete |
 | Phase 22 | Real-money infrastructure: isolated `real_*` tables, read-only Binance client, separate `main_real.py` entry point, `--mode sync`/`daemon` | ✅ Complete |
+| Phase 23 | Real-money API endpoints (`/real/portfolio`, `/real/trades`, `/real/safety`) with kill-switch controls | ✅ Complete |
+| Phase 24 | Next.js real-account pages (`/real` controls, `/real/positions`, `/real/wallet`) in DEMO/REAL sidebar | ✅ Complete |
 
 ---
 

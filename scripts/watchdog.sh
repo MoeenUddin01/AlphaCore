@@ -6,6 +6,7 @@ PROJECT_DIR="/home/moeen/projects/AlphaCore"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 API_LOG="$PROJECT_DIR/logs/api.log"
 SCHED_LOG="$PROJECT_DIR/logs/scheduler.log"
+REAL_LOG="$PROJECT_DIR/logs/real_daemon.log"
 NGROK_LOG="$PROJECT_DIR/logs/ngrok.log"
 
 # Check API
@@ -19,6 +20,12 @@ fi
 if pgrep -f "main.py --mode api" > /dev/null 2>&1 && ! pgrep -f "main.py --mode trade" > /dev/null 2>&1; then
     cd "$PROJECT_DIR"
     setsid "$VENV_PYTHON" main.py --mode trade >> "$SCHED_LOG" 2>&1 &
+fi
+
+# Check real-account sync daemon (only start if API is running)
+if pgrep -f "main.py --mode api" > /dev/null 2>&1 && ! pgrep -f "main_real.py" > /dev/null 2>&1; then
+    cd "$PROJECT_DIR"
+    setsid "$VENV_PYTHON" main_real.py --mode daemon >> "$REAL_LOG" 2>&1 &
 fi
 
 # Check ngrok (only start if API is running)
