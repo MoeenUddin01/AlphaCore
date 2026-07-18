@@ -41,6 +41,39 @@ def _api_reachable() -> bool:
         return False
 
 
+_DEMO_PAGES: dict[str, str] = {
+    "Overview": "overview",
+    "ML Signals": "signals",
+    "Trade History": "trades",
+    "Risk Dashboard": "risk",
+    "Validation": "validation",
+}
+
+_REAL_PAGES: dict[str, str] = {
+    "Positions": "real_positions",
+    "Portfolio / Wallet": "real_wallet",
+    "Signals": "real_signals",
+    "Performance": "real_performance",
+    "Risk": "real_risk",
+}
+
+_MODE_DEMO = "🔬 DEMO (Paper Trading)"
+_MODE_REAL = "⚠ REAL (Live Money)"
+
+
+def _render_real_banner() -> None:
+    """Render the red 'LIVE MONEY' banner at the top of every REAL page."""
+    st.markdown(
+        "<div style='"
+        "background: linear-gradient(90deg, #8b0000, #cc0000, #8b0000); "
+        "color: white; padding: 10px 20px; border-radius: 6px; text-align: center; "
+        "font-weight: bold; font-size: 18px; letter-spacing: 2px; margin-bottom: 16px; "
+        "border: 2px solid #ff4444;"
+        "'>⚠  REAL — LIVE MONEY  ⚠</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     """Render the sidebar and route to the selected page."""
     st_autorefresh(interval=60000, key="autorefresh")
@@ -48,22 +81,23 @@ def main() -> None:
     st.sidebar.title("AlphaCore 📈")
     st.sidebar.caption("Autonomous Crypto Quant System")
 
-    page = st.sidebar.selectbox(
-        "Navigate",
-        [
-            "Overview",
-            "ML Signals",
-            "Trade History",
-            "Risk Dashboard",
-            "Validation",
-            "═══ REAL MONEY ═══",
-            "REAL — Positions",
-            "REAL — Portfolio/Wallet",
-            "REAL — Signals",
-            "REAL — Performance",
-            "REAL — Risk",
-        ],
+    mode = st.sidebar.radio(
+        "Mode",
+        [_MODE_DEMO, _MODE_REAL],
+        index=0,
+        label_visibility="collapsed",
     )
+
+    if mode == _MODE_DEMO:
+        page_label = st.sidebar.selectbox(
+            "Page", list(_DEMO_PAGES.keys()), index=0,
+        )
+        page_key = _DEMO_PAGES[page_label]
+    else:
+        page_label = st.sidebar.selectbox(
+            "Page", list(_REAL_PAGES.keys()), index=0,
+        )
+        page_key = _REAL_PAGES[page_label]
 
     st.sidebar.divider()
 
@@ -77,61 +111,54 @@ def main() -> None:
         st.rerun()
 
     st.sidebar.divider()
-    st.sidebar.markdown("**Trading Controls**")
 
-    col1, col2 = st.sidebar.columns(2)
-    if col1.button("⏸ Pause"):
-        try:
-            r = requests.post(f"{API_BASE_URL}/portfolio/pause-trading", timeout=5)
-            st.sidebar.success(r.json().get("message", "Paused"))
-        except requests.RequestException:
-            st.sidebar.error("API unreachable")
+    if mode == _MODE_DEMO:
+        st.sidebar.markdown("**Trading Controls**")
+        col1, col2 = st.sidebar.columns(2)
+        if col1.button("⏸ Pause"):
+            try:
+                r = requests.post(f"{API_BASE_URL}/portfolio/pause-trading", timeout=5)
+                st.sidebar.success(r.json().get("message", "Paused"))
+            except requests.RequestException:
+                st.sidebar.error("API unreachable")
 
-    if col2.button("▶ Resume"):
-        try:
-            r = requests.post(f"{API_BASE_URL}/portfolio/resume-trading", timeout=5)
-            st.sidebar.success(r.json().get("message", "Resumed"))
-        except requests.RequestException:
-            st.sidebar.error("API unreachable")
+        if col2.button("▶ Resume"):
+            try:
+                r = requests.post(f"{API_BASE_URL}/portfolio/resume-trading", timeout=5)
+                st.sidebar.success(r.json().get("message", "Resumed"))
+            except requests.RequestException:
+                st.sidebar.error("API unreachable")
+    else:
+        st.sidebar.warning("Read-only sync — no trading controls")
 
     st.sidebar.divider()
     st.sidebar.caption("v1.0.0")
 
     try:
-        if page == "Overview":
+        if page_key == "overview":
             render_overview()
-        elif page == "ML Signals":
+        elif page_key == "signals":
             render_signals()
-        elif page == "Trade History":
+        elif page_key == "trades":
             render_trades()
-        elif page == "Risk Dashboard":
+        elif page_key == "risk":
             render_risk()
-        elif page == "Validation":
+        elif page_key == "validation":
             render_validation()
-        elif page == "═══ REAL MONEY ═══":
-            st.title("REAL — Live Money Account")
-            st.markdown(
-                "<div style='background: linear-gradient(90deg, #8b0000, #cc0000, #8b0000); "
-                "color: white; padding: 20px; border-radius: 8px; text-align: center; "
-                "font-weight: bold; font-size: 20px; border: 2px solid #ff4444;'>"
-                "⚠  REAL — LIVE MONEY  ⚠"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-            st.info(
-                "Select a REAL sub-tab from the sidebar to view positions, "
-                "portfolio, performance, or risk metrics from the real Binance account.\n\n"
-                "**The real account is currently READ-ONLY.** No trades are placed."
-            )
-        elif page == "REAL — Positions":
+        elif page_key == "real_positions":
+            _render_real_banner()
             render_real_positions()
-        elif page == "REAL — Portfolio/Wallet":
+        elif page_key == "real_wallet":
+            _render_real_banner()
             render_real_wallet()
-        elif page == "REAL — Signals":
+        elif page_key == "real_signals":
+            _render_real_banner()
             render_real_signals()
-        elif page == "REAL — Performance":
+        elif page_key == "real_performance":
+            _render_real_banner()
             render_real_performance()
-        elif page == "REAL — Risk":
+        elif page_key == "real_risk":
+            _render_real_banner()
             render_real_risk()
     except Exception:
         st.exception("An unhandled error occurred on this page.")
