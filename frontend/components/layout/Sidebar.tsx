@@ -10,10 +10,12 @@ import {
   ShieldAlert,
   FlaskConical,
   Wallet,
+  Swords,
+  CircleUser,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
-const NAV_ITEMS = [
+const DEMO_ITEMS = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/wallet", label: "Wallet", icon: Wallet },
   { href: "/signals", label: "Signals", icon: Activity },
@@ -21,6 +23,48 @@ const NAV_ITEMS = [
   { href: "/risk", label: "Risk", icon: ShieldAlert },
   { href: "/validation", label: "Validation", icon: FlaskConical },
 ];
+
+const REAL_ITEMS = [
+  { href: "/real", label: "Safety Controls", icon: Swords },
+  { href: "/real/positions", label: "Positions", icon: CircleUser },
+  { href: "/real/wallet", label: "Portfolio / Wallet", icon: Wallet },
+];
+
+function NavSection({
+  label,
+  items,
+  pathname,
+}: {
+  label: string;
+  items: { href: string; label: string; icon: any }[];
+  pathname: string;
+}) {
+  return (
+    <div>
+      <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-widest text-zinc-600">
+        {label}
+      </p>
+      {items.map(({ href, label, icon: Icon }) => {
+        const isActive =
+          href === "/" ? pathname === "/" : pathname.startsWith(href);
+        return (
+          <Link
+            key={href}
+            href={href}
+            className={`flex items-center gap-3 px-3 py-[10px] rounded-md text-[14px] transition-colors ${
+              isActive
+                ? "bg-zinc-800 text-white"
+                : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50"
+            }`}
+          >
+            <span><Icon size={18} /></span>
+            <span>{label}</span>
+          </Link>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function Sidebar() {
   const pathname = usePathname();
@@ -41,25 +85,10 @@ export default function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 space-y-1">
-        {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const isActive =
-            href === "/" ? pathname === "/" : pathname.startsWith(href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={`flex items-center gap-3 px-3 py-[10px] rounded-md text-[14px] transition-colors ${
-                isActive
-                  ? "bg-zinc-800 text-white"
-                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50"
-              }`}
-            >
-              <span><Icon size={18} /></span>
-              <span>{label}</span>
-            </Link>
-          );
-        })}
+      <nav className="flex-1 overflow-y-auto px-3 space-y-1">
+        <NavSection label="DEMO Account" items={DEMO_ITEMS} pathname={pathname} />
+        <div className="my-3 border-t border-zinc-800" />
+        <NavSection label="REAL Account" items={REAL_ITEMS} pathname={pathname} />
       </nav>
 
       {/* System status */}

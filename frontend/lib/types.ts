@@ -118,3 +118,52 @@ export interface TradingStatusResponse {
   is_paused: boolean;
   status: string;
 }
+
+// ── Real Account Types ──────────────────────────────────────────
+
+export interface RealSafetyStatusResponse {
+  trading_halted: boolean;
+  daily_loss: number;
+  trades_today: number;
+  limits: {
+    max_position_usd: number;
+    max_daily_loss_usd: number;
+    max_trades_per_day: number;
+  };
+}
+
+export interface RealPositionResponse {
+  symbol: string;
+  quantity: number;
+  avg_entry_price: number;
+  current_price: number;
+  unrealised_pnl: number;
+  updated_at: string;
+}
+
+export interface RealPortfolioSnapshotResponse {
+  id: string;
+  sync_id: string;
+  total_value: number;
+  cash: number;
+  positions_value: number;
+  unrealised_pnl: number;
+  realised_pnl: number;
+  peak_value: number;
+  drawdown_pct: number;
+  created_at: string;
+}
+
+export interface RealTradeResponse {
+  id: string;
+  sync_id: string;
+  symbol: string;
+  side: string;
+  executed_quantity: number | null;
+  executed_price: number | null;
+  order_id: string | null;
+  status: string;
+  pnl: number | null;
+  fee_paid: number | null;
+  created_at: string;
+}

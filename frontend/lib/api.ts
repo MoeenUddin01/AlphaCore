@@ -2,6 +2,10 @@ import type {
   HealthResponse,
   PortfolioSnapshotResponse,
   PerformanceMetricsResponse,
+  RealPortfolioSnapshotResponse,
+  RealPositionResponse,
+  RealSafetyStatusResponse,
+  RealTradeResponse,
   SentimentValidationResponse,
   SignalResponse,
   TradeResponse,
@@ -103,6 +107,48 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ symbol, quantity: quantity ?? null }),
     });
+  },
+
+  // ── Real Account API ────────────────────────────────────────
+
+  getRealSafetyStatus(): Promise<RealSafetyStatusResponse> {
+    return fetchApi<RealSafetyStatusResponse>("/real/safety/status");
+  },
+
+  toggleRealKillSwitch(halted: boolean, confirm: string): Promise<any> {
+    return fetchApi<any>("/real/safety/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ halted, confirm }),
+    });
+  },
+
+  getRealPortfolioHistory(limit = 50): Promise<RealPortfolioSnapshotResponse[]> {
+    return fetchApi<RealPortfolioSnapshotResponse[]>(
+      `/real/portfolio/history?limit=${limit}`
+    );
+  },
+
+  getRealPortfolioLatest(): Promise<RealPortfolioSnapshotResponse | null> {
+    return fetchApi<RealPortfolioSnapshotResponse | null>("/real/portfolio/latest");
+  },
+
+  getRealPositions(): Promise<RealPositionResponse[]> {
+    return fetchApi<RealPositionResponse[]>("/real/portfolio/positions");
+  },
+
+  getRealTradeHistory(
+    limit = 50,
+    symbol?: string
+  ): Promise<RealTradeResponse[]> {
+    const query = symbol
+      ? `/real/trades/history?limit=${limit}&symbol=${symbol}`
+      : `/real/trades/history?limit=${limit}`;
+    return fetchApi<RealTradeResponse[]>(query);
+  },
+
+  getRealTradeStats(): Promise<any> {
+    return fetchApi<any>("/real/trades/stats");
   },
 };
 

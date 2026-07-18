@@ -11,6 +11,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from src.api.routes.portfolio import router as portfolio_router
 from src.api.routes.real_portfolio import router as real_portfolio_router
+from src.api.routes.real_safety import router as real_safety_router
 from src.api.routes.real_trades import router as real_trades_router
 from src.api.routes.signals import router as signals_router
 from src.api.routes.trades import router as trades_router
@@ -37,6 +38,7 @@ app.add_middleware(
 
 app.include_router(portfolio_router)
 app.include_router(real_portfolio_router)
+app.include_router(real_safety_router)
 app.include_router(real_trades_router)
 app.include_router(trades_router)
 app.include_router(signals_router)
