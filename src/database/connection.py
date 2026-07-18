@@ -65,6 +65,7 @@ def init_db() -> None:
         RealPosition,
         RealPortfolioSnapshot,
         RealPortfolioState,
+        RealSafetyState,
         RealTrade,
         Signal,
         Trade,
@@ -77,6 +78,7 @@ def init_db() -> None:
 
     _migrate_trades_table(engine)
     _migrate_portfolio_state_table(engine)
+    _migrate_real_safety_state_table(engine)
 
     _logger.info(
         "Database ready — %d table(s) registered, %d created",
@@ -127,6 +129,41 @@ def _migrate_portfolio_state_table(db_engine: Engine) -> None:
             if col_name not in existing:
                 _logger.warning("Adding missing column '%s' to portfolio_state table", col_name)
                 conn.execute(text(f"ALTER TABLE portfolio_state ADD COLUMN {col_name} {col_def}"))
+        conn.commit()
+
+
+def _migrate_real_safety_state_table(db_engine: Engine) -> None:
+    """Create ``real_safety_state`` if it doesn't exist, and seed the singleton row.
+
+    Also adds the ``trading_halted`` column if the table exists but
+    was created before the column was added to the model.
+    """
+    from datetime import datetime as _dt
+
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(db_engine)
+
+    if not inspector.has_table("real_safety_state"):
+        return
+
+    existing = {col["name"] for col in inspector.get_columns("real_safety_state")}
+    now_str = _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    with db_engine.connect() as conn:
+        if "trading_halted" not in existing:
+            _logger.warning("Adding missing column 'trading_halted' to real_safety_state")
+            conn.execute(text("ALTER TABLE real_safety_state ADD COLUMN trading_halted BOOLEAN NOT NULL DEFAULT TRUE"))
+
+        row = conn.execute(text("SELECT id FROM real_safety_state WHERE id = 'singleton'")).fetchone()
+        if row is None:
+            conn.execute(
+                text(
+                    "INSERT INTO real_safety_state (id, trading_halted, created_at, updated_at) "
+                    "VALUES ('singleton', TRUE, :ts, :ts)"
+                ),
+                {"ts": now_str},
+            )
         conn.commit()
 
 

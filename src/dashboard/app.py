@@ -12,6 +12,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from src.dashboard.pages.overview import render as render_overview
+from src.dashboard.pages.real_controls import render as render_real_controls
 from src.dashboard.pages.real_performance import render as render_real_performance
 from src.dashboard.pages.real_positions import render as render_real_positions
 from src.dashboard.pages.real_risk import render as render_real_risk
@@ -50,6 +51,7 @@ _DEMO_PAGES: dict[str, str] = {
 }
 
 _REAL_PAGES: dict[str, str] = {
+    "Safety Controls": "real_controls",
     "Positions": "real_positions",
     "Portfolio / Wallet": "real_wallet",
     "Signals": "real_signals",
@@ -145,6 +147,9 @@ def main() -> None:
             render_risk()
         elif page_key == "validation":
             render_validation()
+        elif page_key == "real_controls":
+            _render_real_banner()
+            render_real_controls()
         elif page_key == "real_positions":
             _render_real_banner()
             render_real_positions()

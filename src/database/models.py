@@ -226,3 +226,19 @@ class RealPortfolioState(Base):
     id = Column(String(20), primary_key=True, default="singleton")
     peak_value = Column(Numeric(20, 8), nullable=False, default=Decimal("0"))
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class RealSafetyState(Base):
+    """Singleton kill-switch state for real-money trading.
+
+    Only one row exists (id='singleton').  ``trading_halted`` defaults
+    to ``True`` so that on a fresh install no real trades can happen
+    until the operator explicitly enables it via the dashboard.
+    """
+
+    __tablename__ = "real_safety_state"
+
+    id = Column(String(20), primary_key=True, default="singleton")
+    trading_halted = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)

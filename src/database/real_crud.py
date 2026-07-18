@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from src.database.connection import get_db
-from src.database.models import RealPortfolioSnapshot, RealPortfolioState, RealPosition, RealTrade
+from src.database.models import RealPortfolioSnapshot, RealPortfolioState, RealPosition, RealSafetyState, RealTrade
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -187,3 +187,122 @@ def get_real_trade_history(
         if symbol is not None:
             query = query.filter(RealTrade.symbol == symbol)
         return query.limit(limit).all()
+
+
+# =============================================================================
+# Safety / Kill-switch CRUD
+# =============================================================================
+
+
+def get_real_trading_halted() -> bool:
+    """Return ``True`` if the real-trading kill switch is active.
+
+    On a fresh install where no ``RealSafetyState`` row exists yet,
+    the function creates one with ``trading_halted=True``.
+    """
+    with get_db() as db:
+        state = db.query(RealSafetyState).filter(RealSafetyState.id == "singleton").first()
+        if state is None:
+            state = RealSafetyState(
+                id="singleton",
+                trading_halted=True,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            db.add(state)
+            db.commit()
+            _logger.warning("No RealSafetyState found — created singleton with trading_halted=True")
+            return True
+        return bool(state.trading_halted)
+
+
+def set_real_trading_halted(halted: bool) -> None:
+    """Set the real-trading kill switch to the given value.
+
+    Args:
+        halted: ``True`` to halt all real trading, ``False`` to allow it.
+    """
+    with get_db() as db:
+        state = db.query(RealSafetyState).filter(RealSafetyState.id == "singleton").first()
+        if state is None:
+            state = RealSafetyState(
+                id="singleton",
+                trading_halted=halted,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            db.add(state)
+        else:
+            state.trading_halted = halted
+            state.updated_at = datetime.utcnow()
+        db.commit()
+        _logger.info("Real-trading kill switch set to halted=%s", halted)
+
+
+def get_real_daily_loss() -> Decimal:
+    """Sum of realised P&L from real trades today.
+
+    "Today" is defined as **UTC midnight** (00:00:00 UTC) to now.  This
+    is unambiguous regardless of the server's local timezone.
+
+    Returns:
+        Negative ``Decimal`` if the day is a net loss, positive for net gain.
+    """
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    with get_db() as db:
+        from sqlalchemy import func as sa_func
+
+        result = (
+            db.query(sa_func.coalesce(sa_func.sum(RealTrade.pnl), Decimal("0")))
+            .filter(RealTrade.created_at >= today_start)
+            .scalar()
+        )
+        return Decimal(str(result)) if result is not None else Decimal("0")
+
+
+def get_real_trades_today_count() -> int:
+    """Count of real trades executed today.
+
+    "Today" is defined as **UTC midnight** (00:00:00 UTC) to now.  This
+    is unambiguous regardless of the server's local timezone.
+
+    Returns:
+        Number of trades with ``created_at`` >= midnight UTC today.
+    """
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    with get_db() as db:
+        from sqlalchemy import func as sa_func
+
+        count = (
+            db.query(sa_func.count(RealTrade.id))
+            .filter(RealTrade.created_at >= today_start)
+            .scalar()
+        )
+        return count or 0
+
+
+def get_real_safety_status() -> dict:
+    """Return a dict with all safety-relevant state for the dashboard.
+
+    Returns:
+        Dict containing ``trading_halted``, ``daily_loss``,
+        ``trades_today``, and ``limits``.
+    """
+    from src.utils.config import settings
+
+    halted = get_real_trading_halted()
+    daily_loss = get_real_daily_loss()
+    trades_today = get_real_trades_today_count()
+
+    return {
+        "trading_halted": halted,
+        "daily_loss": daily_loss,
+        "trades_today": trades_today,
+        "limits": {
+            "max_position_usd": settings.REAL_MAX_POSITION_USD,
+            "max_daily_loss_usd": settings.REAL_MAX_DAILY_LOSS_USD,
+            "max_trades_per_day": settings.REAL_MAX_TRADES_PER_DAY,
+        },
+    }

@@ -74,5 +74,15 @@ class Settings(BaseSettings):
     Default: 15 minutes (4x per hour).
     """
 
+    # --- Real-trading safety limits ---
+    REAL_MAX_POSITION_USD: Decimal = Decimal("10")
+    """Max USD value for any single real position (default $10)."""
+
+    REAL_MAX_DAILY_LOSS_USD: Decimal = Decimal("5")
+    """If realised daily loss exceeds this, auto-halt real trading (default $5)."""
+
+    REAL_MAX_TRADES_PER_DAY: int = 3
+    """Hard cap on real trades per day (default 3)."""
+
 
 settings = Settings()
