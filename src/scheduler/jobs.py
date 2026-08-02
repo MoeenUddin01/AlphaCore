@@ -24,6 +24,7 @@ from src.database.crud import get_current_portfolio_state, get_total_realised_pn
 from src.database.models import PortfolioSnapshot, Position as PositionModel, Trade as TradeModel
 from src.utils.config import settings
 from src.utils.helpers import format_pair_for_binance, send_alert
+from src.utils.heartbeat import cycle_end, cycle_start, touch as heartbeat_touch
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -33,6 +34,10 @@ _EXIT_LOCK_PATH = f"{settings.DATA_CACHE_DIR}/.exit_check.lock"
 
 _SANE_PORTFOLIO_MIN = Decimal("0")
 _SANE_PORTFOLIO_MAX_MULTIPLIER = Decimal("10")
+# Binance minimum notional floor: when the exchange filter is absent
+# (e.g. testnet returns MIN_NOTIONAL=None), use this as fallback.
+# Binance enforces ~$5 on most pairs; testnet may not enforce at all.
+_MIN_NOTIONAL_FLOOR = Decimal("5.00")
 
 
 def validate_cycle_integrity(final_state: dict[str, Any]) -> list[str]:
@@ -197,6 +202,7 @@ def run_trading_cycle() -> None:
         _logger.warning("Cycle %s already processed — skipping", cycle_id)
         return
 
+    cycle_start(cycle_id)
     try:
         pipeline_data = DataPipeline().run()
         portfolio_summary: dict[str, Any] = get_current_portfolio_state()
@@ -226,6 +232,7 @@ def run_trading_cycle() -> None:
         _logger.exception("Trading cycle failed — full traceback below")
         send_alert("Trading cycle failed — see scheduler logs for details", level="error")
     finally:
+        cycle_end(cycle_id)
         lock.release()
         _logger.debug("Released trading cycle lock at %s", _LOCK_PATH)
 
@@ -265,6 +272,7 @@ def run_exit_check() -> None:
         now = datetime.utcnow()
 
         exit_count = 0
+        dust_skipped = 0
         weight_estimate = 0
 
         for symbol, hdata in holdings.items():
@@ -301,6 +309,28 @@ def run_exit_check() -> None:
                 else Decimal("0")
             )
 
+            # Pre-check: skip if position notional is below exchange MIN_NOTIONAL.
+            # This prevents retrying a doomed sell every 15 min for dust positions.
+            # Uses exchange filter if present, otherwise falls back to _MIN_NOTIONAL_FLOOR.
+            notional = qty * current_price
+            try:
+                filters = binance.get_symbol_filters(symbol)
+                min_notional_val = filters.get("min_notional", {}).get("minNotional")
+                effective_min = min_notional_val if (min_notional_val and min_notional_val > Decimal("0")) else _MIN_NOTIONAL_FLOOR
+                if notional < effective_min:
+                    _logger.warning(
+                        "AUTO-EXIT SKIPPED %s — dust position: notional $%.2f < min $%s. "
+                        "Position cannot be sold at this size. Qty=%s price=$%.2f",
+                        symbol, float(notional), effective_min, qty, float(current_price),
+                    )
+                    dust_skipped += 1
+                    continue
+            except Exception as exc:
+                _logger.warning(
+                    "Could not fetch symbol filters for %s — proceeding with exit: %s",
+                    symbol, exc,
+                )
+
             auto_exit = ProposedTrade(
                 symbol=symbol,
                 side="SELL",
@@ -329,66 +359,72 @@ def run_exit_check() -> None:
                 exit_count += 1
                 weight_estimate += 10
 
-            cycle_id = f"exit-check-{uuid4()}"
+                cycle_id = f"exit-check-{uuid4()}"
 
-            with get_db() as db:
-                db.add(
-                    TradeModel(
-                        cycle_id=cycle_id,
-                        symbol=symbol,
-                        side="SELL",
-                        proposed_quantity=qty,
-                        executed_quantity=executed.executed_quantity,
-                        entry_price=entry_price,
-                        executed_price=executed.executed_price,
-                        stop_loss_price=sl_price,
-                        take_profit_price=tp_price,
-                        order_id=executed.order_id,
-                        status=executed.status,
-                        is_sentiment_driven=False,
-                        trade_origin="bot_auto_exit",
-                        signal_confidence=1.0,
-                        reasoning=(
-                            f"AUTO-EXIT: {reason} triggered at "
-                            f"{float(current_price):.2f}"
-                        ),
-                        pnl=executed.pnl,
-                        fee_paid=executed.fee_paid,
-                        created_at=now,
-                    )
-                )
-
-                position = (
-                    db.query(PositionModel)
-                    .filter(PositionModel.symbol == symbol)
-                    .first()
-                )
-                if position:
-                    position.quantity -= executed.executed_quantity
-                    if position.quantity <= Decimal("0"):
-                        db.delete(position)
-                        _logger.info(
-                            "Position fully closed (exit check): %s", symbol
+                with get_db() as db:
+                    db.add(
+                        TradeModel(
+                            cycle_id=cycle_id,
+                            symbol=symbol,
+                            side="SELL",
+                            proposed_quantity=qty,
+                            executed_quantity=executed.executed_quantity,
+                            entry_price=entry_price,
+                            executed_price=executed.executed_price,
+                            stop_loss_price=sl_price,
+                            take_profit_price=tp_price,
+                            order_id=executed.order_id,
+                            status=executed.status,
+                            is_sentiment_driven=False,
+                            trade_origin="bot_auto_exit",
+                            signal_confidence=1.0,
+                            reasoning=(
+                                f"AUTO-EXIT: {reason} triggered at "
+                                f"{float(current_price):.2f}"
+                            ),
+                            pnl=executed.pnl,
+                            fee_paid=executed.fee_paid,
+                            created_at=now,
                         )
+                    )
+
+                    position = (
+                        db.query(PositionModel)
+                        .filter(PositionModel.symbol == symbol)
+                        .first()
+                    )
+                    if position:
+                        position.quantity -= executed.executed_quantity
+                        if position.quantity <= Decimal("0"):
+                            db.delete(position)
+                            _logger.info(
+                                "Position fully closed (exit check): %s", symbol
+                            )
+                        else:
+                            position.updated_at = now
+                            _logger.info(
+                                "Position reduced (exit check): %s qty=%s",
+                                symbol, position.quantity,
+                            )
                     else:
-                        position.updated_at = now
-                        _logger.info(
-                            "Position reduced (exit check): %s qty=%s",
-                            symbol, position.quantity,
+                        _logger.warning(
+                            "Exit check: SELL executed for %s but no open Position row found",
+                            symbol,
                         )
-                else:
-                    _logger.warning(
-                        "Exit check: SELL executed for %s but no open Position row found",
-                        symbol,
-                    )
 
-            _logger.info(
-                "AUTO-EXIT %s — %s triggered. "
-                "entry=%.2f exit=%.2f pnl=%.2f%% qty=%s",
-                symbol, reason,
-                float(entry_price), float(executed.executed_price),
-                float(pnl_pct), executed.executed_quantity,
-            )
+                _logger.info(
+                    "AUTO-EXIT %s — %s triggered. "
+                    "entry=%.2f exit=%.2f pnl=%.2f%% qty=%s",
+                    symbol, reason,
+                    float(entry_price), float(executed.executed_price),
+                    float(pnl_pct), executed.executed_quantity,
+                )
+            else:
+                _logger.warning(
+                    "AUTO-EXIT %s — %s triggered but execution failed (status=%s). "
+                    "Not recording trade or modifying position.",
+                    symbol, reason, executed.status,
+                )
 
         _logger.info(
             "Exit check rate-limit headroom — "
@@ -401,13 +437,19 @@ def run_exit_check() -> None:
             60 // settings.EXIT_CHECK_INTERVAL_MINUTES,
         )
 
-        if exit_count == 0:
+        if exit_count == 0 and dust_skipped == 0:
             _logger.info("No exit conditions triggered")
+        elif exit_count == 0 and dust_skipped > 0:
+            _logger.info(
+                "Exit check: %d position(s) at SL/TP but skipped (dust — below MIN_NOTIONAL)",
+                dust_skipped,
+            )
         else:
-            _logger.info("Exit check: %d position(s) closed", exit_count)
+            _logger.info("Exit check: %d position(s) closed, %d skipped (dust)", exit_count, dust_skipped)
     except Exception:
         _logger.exception("Exit check failed — full traceback below")
     finally:
+        heartbeat_touch()
         lock.release()
         _logger.debug("Released exit-check lock")
 
@@ -565,6 +607,8 @@ def run_data_cache_refresh() -> None:
         _logger.info("=== DATA CACHE REFRESH DONE ===")
     except Exception:
         _logger.exception("Data cache refresh failed — full traceback below")
+    finally:
+        heartbeat_touch()
 
 
 def health_check_job() -> None:
@@ -578,6 +622,7 @@ def health_check_job() -> None:
         _logger.info("=== HEALTH CHECK OK ===")
     else:
         _logger.error("=== HEALTH CHECK FAILED ===")
+    heartbeat_touch()
 
 
 def run_model_training() -> None:

@@ -223,6 +223,26 @@ class PortfolioMonitor:
             if not hit_sl and not hit_tp:
                 continue
 
+            # Skip dust positions that cannot be sold (below MIN_NOTIONAL)
+            notional = qty * current_price
+            try:
+                filters = self.binance.get_symbol_filters(symbol)
+                min_notional_val = filters.get("min_notional", {}).get("minNotional")
+                # Use exchange filter if present, otherwise Binance floor (~$5)
+                _MIN_NOTIONAL_FLOOR = Decimal("5.00")
+                effective_min = min_notional_val if (min_notional_val and min_notional_val > Decimal("0")) else _MIN_NOTIONAL_FLOOR
+                if notional < effective_min:
+                    _logger.warning(
+                        "check_exit: SKIPPED %s — dust position notional $%.2f < min $%s",
+                        symbol, float(notional), effective_min,
+                    )
+                    continue
+            except Exception as exc:
+                _logger.warning(
+                    "check_exit: could not fetch filters for %s — proceeding: %s",
+                    symbol, exc,
+                )
+
             reason = "stop loss" if hit_sl else "take profit"
             pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else Decimal("0")
 

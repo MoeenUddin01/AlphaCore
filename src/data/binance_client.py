@@ -19,6 +19,11 @@ _FUTURES_ERROR_MSG = "pair is not a valid futures symbol"
 
 _logger = get_logger(__name__)
 
+# Hard timeout for every Binance request. python-binance passes this to
+# requests; without it a black-holed TCP connection would block forever
+# and freeze the scheduler thread. 15s is generous for market endpoints.
+_REQUEST_TIMEOUT_S = 15
+
 _INTERVAL_MS = {
     "1m": 60_000,
     "5m": 300_000,
@@ -48,6 +53,7 @@ class BinanceClient:
             api_key=settings.BINANCE_API_KEY,
             api_secret=settings.BINANCE_API_SECRET,
             testnet=settings.BINANCE_TESTNET,
+            requests_params={"timeout": _REQUEST_TIMEOUT_S},
         )
         self._filters_cache: dict[str, dict] = {}
 
@@ -189,7 +195,7 @@ class BinanceClient:
         symbol = format_pair_for_binance(pair)
         _logger.info("[MAINNET-READONLY] Fetching %d %s klines for %s", limit, interval, symbol)
 
-        mainnet_client = Client()  # no api_key/secret → mainnet public endpoint
+        mainnet_client = Client(requests_params={"timeout": _REQUEST_TIMEOUT_S})  # no api_key/secret → mainnet public endpoint
 
         try:
             if limit <= 1000:

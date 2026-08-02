@@ -61,6 +61,33 @@ class DataPipeline:
         except Exception as exc:
             _logger.warning("Failed to fetch Fear & Greed index: %s", exc)
 
+        # Batch-fetch market data for ALL pairs in a single CoinGecko call
+        # to avoid per-pair rate limiting (free tier: ~30 calls/min).
+        all_coin_ids: list[str] = []
+        pair_to_coin_id: dict[str, str] = {}
+        for pair in pairs:
+            try:
+                coin_id = self.coingecko.get_coin_id(pair)
+                pair_to_coin_id[pair] = coin_id
+                all_coin_ids.append(coin_id)
+            except Exception as exc:
+                _logger.warning("Could not map %s to CoinGecko ID: %s", pair, exc)
+
+        market_data_map: dict[str, dict[str, Any]] = {}
+        if all_coin_ids:
+            try:
+                market_list = self.coingecko.get_market_data(all_coin_ids)
+                for item in market_list:
+                    cid = item.get("id", "")
+                    if cid:
+                        market_data_map[cid] = item
+                _logger.info(
+                    "Batch market data fetched for %d coin(s) in 1 API call",
+                    len(all_coin_ids),
+                )
+            except Exception as exc:
+                _logger.warning("Batch market data fetch failed: %s", exc)
+
         result: dict[str, dict[str, Any]] = {}
 
         for pair in pairs:
@@ -90,13 +117,8 @@ class DataPipeline:
                 _logger.error("Price fetch failed for %s: %s", pair, exc)
                 pair_data["current_price"] = Decimal("0")
 
-            try:
-                coin_id = self.coingecko.get_coin_id(pair)
-                market_data_list = self.coingecko.get_market_data([coin_id])
-                pair_data["market_data"] = market_data_list[0] if market_data_list else {}
-            except Exception as exc:
-                _logger.error("Market data failed for %s: %s", pair, exc)
-                pair_data["market_data"] = {}
+            coin_id = pair_to_coin_id.get(pair)
+            pair_data["market_data"] = market_data_map.get(coin_id, {}) if coin_id else {}
 
             news = self.news_client.fetch_headlines(pair, limit_per_source=15)
             pair_data["news"] = news

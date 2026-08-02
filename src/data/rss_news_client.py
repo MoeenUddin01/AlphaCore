@@ -58,7 +58,7 @@ class CoinDeskRSSClient:
         _logger.info("Fetching CoinDesk RSS for %s (keywords: %s)", pair, keywords)
 
         try:
-            feed = feedparser.parse(self._RSS_URL)
+            feed = feedparser.parse(self._RSS_URL, timeout=15)
         except Exception as exc:
             _logger.error("CoinDesk RSS parse failed for %s: %s", pair, exc)
             return []

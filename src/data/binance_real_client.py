@@ -24,6 +24,11 @@ from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
 
+# Hard timeout for every Binance request — prevents a hung TCP connection
+# from freezing the real-account sync daemon (see _REQUEST_TIMEOUT_S in
+# binance_client.py for the same rationale).
+_REQUEST_TIMEOUT_S = 15
+
 _REQUIRED_CONFIG_MSG = (
     "Real Binance account sync is not configured. "
     "Set BINANCE_REAL_API_KEY, BINANCE_REAL_API_SECRET, "
@@ -56,7 +61,12 @@ class BinanceRealClient:
         if not key or not secret or "your_" in key.lower() or "your_" in secret.lower():
             raise RuntimeError(_REQUIRED_CONFIG_MSG)
 
-        self._client = Client(api_key=key, api_secret=secret, testnet=False)
+        self._client = Client(
+            api_key=key,
+            api_secret=secret,
+            testnet=False,
+            requests_params={"timeout": _REQUEST_TIMEOUT_S},
+        )
         _logger.info("BinanceRealClient initialised (read-only)")
 
     def get_account_balances(self) -> dict[str, Decimal]:

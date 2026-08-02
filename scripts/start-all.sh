@@ -13,15 +13,39 @@ API_LOG="$LOG_DIR/api.log"
 SCHED_LOG="$LOG_DIR/scheduler.log"
 SYNC_LOG="$LOG_DIR/sync.log"
 NGROK_LOG="$LOG_DIR/ngrok.log"
+STARTUP_LOCK="$LOG_DIR/.start-all.lock"
+
+# Prevent concurrent invocations (flock exits if another instance holds the lock)
+exec 200>"$STARTUP_LOCK"
+if ! flock -n 200; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Another start-all.sh is already running — exiting"
+    exit 0
+fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') === AlphaCore auto-start ==="
 
-# Kill any existing processes
+# Kill any existing processes and wait for them to exit
 pkill -f "main.py --mode api" 2>/dev/null || true
 pkill -f "main.py --mode trade" 2>/dev/null || true
 pkill -f "main_real.py" 2>/dev/null || true
 pkill -f "ngrok http" 2>/dev/null || true
-sleep 2
+
+# Wait up to 10s for processes to fully exit
+for i in $(seq 1 10); do
+    if ! pgrep -f "main.py --mode api" > /dev/null 2>&1 && \
+       ! pgrep -f "main.py --mode trade" > /dev/null 2>&1 && \
+       ! pgrep -f "main_real.py" > /dev/null 2>&1; then
+        echo "All old processes exited"
+        break
+    fi
+    sleep 1
+done
+
+# Final safety: kill any stragglers
+pkill -9 -f "main.py --mode api" 2>/dev/null || true
+pkill -9 -f "main.py --mode trade" 2>/dev/null || true
+pkill -9 -f "main_real.py" 2>/dev/null || true
+sleep 1
 
 # Wait for network
 echo "Waiting for network..."
