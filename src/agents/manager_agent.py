@@ -220,20 +220,50 @@ class ManagerAgent:
         price_data = pair_data.get("current_price", None)
         if price_data is not None:
             try:
-                entry_price = Decimal(str(price_data))
+                market_price = Decimal(str(price_data))
             except (ValueError, TypeError):
-                entry_price = Decimal("0")
+                market_price = Decimal("0")
         else:
-            entry_price = Decimal("0")
+            market_price = Decimal("0")
 
-        if entry_price <= Decimal("0"):
-            _logger.warning("Skipping %s: invalid entry price %s", sig.symbol, entry_price)
+        if market_price <= Decimal("0"):
+            _logger.warning("Skipping %s: invalid entry price %s", sig.symbol, market_price)
             return None
 
-        max_position = Decimal(str(settings.MAX_POSITION_SIZE_PCT))
-        pct_quantity = (max_position * Decimal(str(portfolio_value)) / entry_price).quantize(Decimal("0.00001"))
+        # For SELL proposals the recorded entry price is the position's real
+        # average entry price (Position.avg_entry_price — the same source the
+        # PnL calculation uses), NOT the current market price. This keeps the
+        # Trade.entry_price column consistent with the PnL basis for sentiment-
+        # driven sells, matching bot_auto_exit and manual sells. BUY proposals
+        # keep the current market price as the entry price.
+        entry_price = market_price
+        if side == "SELL":
+            hdata = holdings_raw.get(sig.symbol, {})
+            if isinstance(hdata, dict):
+                try:
+                    avg_entry = Decimal(str(hdata.get("avg_entry_price", 0)))
+                except (ValueError, TypeError):
+                    avg_entry = Decimal("0")
+                if avg_entry > Decimal("0"):
+                    entry_price = avg_entry
+                    _logger.info(
+                        "%s SELL entry_price from Position avg_entry=%s (market=%s)",
+                        sig.symbol, entry_price, market_price,
+                    )
+                else:
+                    _logger.warning(
+                        "%s SELL — holdings missing avg_entry_price; "
+                        "falling back to market price %s",
+                        sig.symbol, market_price,
+                    )
 
-        max_usd_qty = (settings.MAX_POSITION_SIZE_USD / entry_price).quantize(Decimal("0.00001"))
+        # Position sizing is always based on the current market price, never
+        # on the historical avg entry, so the proposed quantity reflects the
+        # live notional value of the trade.
+        max_position = Decimal(str(settings.MAX_POSITION_SIZE_PCT))
+        pct_quantity = (max_position * Decimal(str(portfolio_value)) / market_price).quantize(Decimal("0.00001"))
+
+        max_usd_qty = (settings.MAX_POSITION_SIZE_USD / market_price).quantize(Decimal("0.00001"))
         base_quantity = min(pct_quantity, max_usd_qty)
 
         _logger.info(
@@ -254,8 +284,8 @@ class ManagerAgent:
             vol_tag = " [LOW VOL: full size]"
 
         sl_pct = Decimal(str(settings.STOP_LOSS_PCT))
-        stop_loss = entry_price * (Decimal("1") - sl_pct)
-        take_profit = entry_price * (Decimal("1") + sl_pct * Decimal("2"))
+        stop_loss = market_price * (Decimal("1") - sl_pct)
+        take_profit = market_price * (Decimal("1") + sl_pct * Decimal("2"))
 
         reasoning = (
             f"Sentiment-driven {side}: score={sentiment_score:.2f}, "

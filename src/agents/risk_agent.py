@@ -23,6 +23,32 @@ _TRADING_PAUSED_FLAG = Path("data_cache/.trading_paused")
 class RiskAgent:
     """Risk management agent — validates and filters trade proposals."""
 
+    @staticmethod
+    def _notional_value(
+        trade: ProposedTrade,
+        market_prices: dict[str, float],
+    ) -> float:
+        """Notional USDT value of a trade for risk sizing.
+
+        SELLs are valued at the current market price of the symbol (when
+        known) rather than ``trade.entry_price`` — the proposal's
+        ``entry_price`` is the position's average entry price for SELLs,
+        which can understate or overstate the live notional being reduced.
+        BUYs use ``entry_price`` (the market price at signal time).
+
+        Args:
+            trade: The proposed trade to value.
+            market_prices: Symbol → current market price map from holdings.
+
+        Returns:
+            The trade's notional value in USDT.
+        """
+        if trade.side == "SELL":
+            market = market_prices.get(trade.symbol)
+            if market and market > 0:
+                return float(trade.quantity) * market
+        return float(trade.quantity * trade.entry_price)
+
     def run(self, state: AgentState) -> AgentState:
         """Screen every proposed trade through five risk checks.
 
@@ -42,12 +68,16 @@ class RiskAgent:
         # and keyed by full pair symbol (e.g. "ADA/USDT").
         holdings_raw: Any = portfolio.get("holdings", {})
         holdings: dict[str, float] = {}
+        market_prices: dict[str, float] = {}
         existing_symbols: set[str] = set()
 
         if isinstance(holdings_raw, dict):
             for sym, hdata in holdings_raw.items():
                 if isinstance(hdata, dict):
                     holdings[sym] = float(hdata.get("value", 0))
+                    cp = hdata.get("current_price")
+                    if cp:
+                        market_prices[sym] = float(cp)
                 else:
                     holdings[sym] = float(hdata)
                 existing_symbols.add(sym)
@@ -118,7 +148,7 @@ class RiskAgent:
                 _logger.warning("Rejected %s (circuit breaker)", trade.symbol)
                 continue
 
-            trade_value = float(trade.quantity * trade.entry_price)
+            trade_value = self._notional_value(trade, market_prices)
 
             if trade_value > settings.MAX_POSITION_SIZE_PCT * total_value:
                 rejection_reasons.append({
@@ -147,7 +177,7 @@ class RiskAgent:
                 continue
 
             existing_exposure = sum(
-                float(et.proposal.quantity * et.proposal.entry_price)
+                self._notional_value(et.proposal, market_prices)
                 for et in state.get("executed_trades", [])
             )
             new_exposure = existing_exposure + trade_value
@@ -213,10 +243,10 @@ class RiskAgent:
         state["approved_trades"] = approved
 
         open_value = sum(
-            float(et.proposal.quantity * et.proposal.entry_price)
+            self._notional_value(et.proposal, market_prices)
             for et in state.get("executed_trades", [])
         )
-        approved_value = sum(float(t.quantity * t.entry_price) for t in approved)
+        approved_value = sum(self._notional_value(t, market_prices) for t in approved)
         portfolio_exposure_pct = ((open_value + approved_value) / total_value * 100) if total_value > 0 else 0.0
 
         state["risk_report"] = {

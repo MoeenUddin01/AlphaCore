@@ -75,6 +75,12 @@ class Trade(Base):
     side = Column(String(4), nullable=False)
     proposed_quantity = Column(Numeric(20, 8), nullable=False)
     executed_quantity = Column(Numeric(20, 8), nullable=True)
+    # For SELL trades this is the position's average entry price
+    # (Position.avg_entry_price). NOTE: rows written BEFORE 2026-08-02 by the
+    # sentiment path stored the market price at signal time instead — the
+    # field is unreliable for bot_sentiment SELLs created before that date and
+    # was NOT backfilled (historical Position.avg_entry_price is not fully
+    # reconstructable because seed positions exist outside the Trade table).
     entry_price = Column(Numeric(20, 8), nullable=False)
     executed_price = Column(Numeric(20, 8), nullable=True)
     stop_loss_price = Column(Numeric(20, 8), nullable=False)

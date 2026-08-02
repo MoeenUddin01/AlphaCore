@@ -1,4 +1,4 @@
-"""Per-agent isolation tests — 11 tests across all four agents.
+"""Per-agent isolation tests — 16 tests across all four agents.
 
 Every test runs in <1 s with *zero* network or database calls.
 ``FakeBinanceClient`` replaces ``BinanceClient`` wherever needed and
@@ -105,6 +105,59 @@ class TestManagerAgent:
         assert len(auto_exits) == 1, "auto-exit trade was overwritten"
         assert auto_exits[0].symbol == "SOL/USDT"
         assert auto_exits[0].reasoning.startswith("AUTO-EXIT")
+
+    @patch("src.data.multi_source_news.MultiSourceNewsClient.fetch_headlines")
+    def test_sentiment_sell_entry_price_is_position_avg_entry(
+        self,
+        mock_fetch: MagicMock,
+        mock_predictor: MagicMock,
+    ) -> None:
+        """Sentiment SELL records Position.avg_entry_price, not the market price.
+
+        Regression test: the manager previously stored ``pipeline_data``
+        ``current_price`` (the market price at signal time) as the SELL's
+        ``entry_price``, which disagreed with the PnL basis. SELL proposals
+        must store ``Position.avg_entry_price`` — the same source the PnL
+        calculation reads from.
+        """
+        mock_fetch.return_value = []
+        mock_predictor.return_value.run_all.return_value = self._make_signals(
+            sentiment_score=-0.45, symbol="SOL/USDT"
+        )
+
+        from src.agents.manager_agent import ManagerAgent
+
+        state = self._make_state({
+            "SOL/USDT": {"current_price": "100.00", "fear_greed": {"value": 50}},
+        })
+        # Market price is 100.00; the position's real avg entry is 80.00.
+        state["portfolio_summary"]["holdings"] = {
+            "SOL/USDT": {
+                "quantity": 5.0,
+                "avg_entry_price": 80.00,
+                "current_price": 100.00,
+                "value": 500.0,
+            },
+        }
+        state["portfolio_summary"]["positions"] = [{
+            "symbol": "SOL/USDT",
+            "quantity": 5.0,
+            "avg_entry_price": 80.00,
+            "current_price": 100.00,
+        }]
+
+        result = ManagerAgent().run(state)
+
+        sells = [t for t in result["proposed_trades"] if t.side == "SELL"]
+        assert len(sells) == 1, f"expected one sentiment SELL, got {len(sells)}"
+        trade = sells[0]
+        assert trade.entry_price == Decimal("80.00"), (
+            f"SELL entry_price must be Position.avg_entry_price (80.00), "
+            f"got {trade.entry_price}"
+        )
+        assert trade.entry_price != Decimal("100.00")
+        assert trade.side == "SELL"
+        assert trade.is_sentiment_driven is True
 
 
 # =========================================================================
@@ -302,3 +355,91 @@ class TestPortfolioMonitor:
 
         auto_exits = [t for t in result.get("proposed_trades", []) if getattr(t, "is_auto_exit", False)]
         assert len(auto_exits) == 0, "no auto-exit should be generated when price is safe"
+
+    # -----------------------------------------------------------------
+    # Hard per-trade loss cap (MAX_LOSS_PER_TRADE_USD, default $5)
+    # -----------------------------------------------------------------
+
+    def test_monitor_no_exit_within_loss_cap(self, mock_binance_cls: MagicMock) -> None:
+        """A losing position within the $5 cap must NOT trigger an exit."""
+        fake = FakeBinanceClient()
+        # entry=80, qty=1.0 → loss = (80 - 76) * 1.0 = $4.00 < $5 cap
+        # SL at 75 is not hit (76 > 75).
+        fake._prices["SOL/USDT"] = Decimal("76.00")
+        mock_binance_cls.return_value = fake
+
+        from src.agents.portfolio_monitor import PortfolioMonitor
+
+        state = state_with_pending_auto_exit(
+            symbol="SOL/USDT", quantity=Decimal("1.0"),
+            stop_loss_price=Decimal("75.00"),
+        )
+
+        result = PortfolioMonitor().check_exits_only(state)
+
+        auto_exits = [t for t in result.get("proposed_trades", []) if getattr(t, "is_auto_exit", False)]
+        assert len(auto_exits) == 0, "loss under cap must not force an exit"
+
+    def test_monitor_forces_exit_when_loss_cap_exceeded(self, mock_binance_cls: MagicMock) -> None:
+        """A loss exceeding the $5 cap forces an exit even with SL NOT hit."""
+        fake = FakeBinanceClient()
+        # entry=80, qty=1.601 → loss = (80 - 76.5) * 1.601 = $5.60 > $5 cap
+        # SL at 75 is NOT hit (76.5 > 75) — only the hard cap triggers.
+        fake._prices["SOL/USDT"] = Decimal("76.50")
+        mock_binance_cls.return_value = fake
+
+        from src.agents.portfolio_monitor import PortfolioMonitor
+
+        state = state_with_pending_auto_exit(
+            symbol="SOL/USDT", quantity=Decimal("1.601"),
+            stop_loss_price=Decimal("75.00"),
+        )
+
+        result = PortfolioMonitor().check_exits_only(state)
+
+        auto_exits = [t for t in result.get("proposed_trades", []) if getattr(t, "is_auto_exit", False)]
+        assert len(auto_exits) == 1, "loss over cap must force an auto-exit"
+        assert auto_exits[0].side == "SELL"
+        assert "hard loss cap" in auto_exits[0].reasoning
+
+    def test_monitor_loss_cap_respects_sl_tp(self, mock_binance_cls: MagicMock) -> None:
+        """SL/TP still triggers normally when the loss is within the cap."""
+        fake = FakeBinanceClient()
+        # entry=80, qty=1.601 → loss = (80 - 78) * 1.601 = $3.20 < $5 cap
+        # SL at 79 IS hit (78 <= 79) → stop-loss exit, not hard cap.
+        fake._prices["SOL/USDT"] = Decimal("78.00")
+        mock_binance_cls.return_value = fake
+
+        from src.agents.portfolio_monitor import PortfolioMonitor
+
+        state = state_with_pending_auto_exit(
+            symbol="SOL/USDT", quantity=Decimal("1.601"),
+            stop_loss_price=Decimal("79.00"),
+        )
+
+        result = PortfolioMonitor().check_exits_only(state)
+
+        auto_exits = [t for t in result.get("proposed_trades", []) if getattr(t, "is_auto_exit", False)]
+        assert len(auto_exits) == 1
+        assert "stop loss" in auto_exits[0].reasoning
+
+    def test_monitor_loss_cap_respects_dust_skip(self, mock_binance_cls: MagicMock) -> None:
+        """Dust-position MIN_NOTIONAL skip still wins over the loss cap."""
+        fake = FakeBinanceClient()
+        # entry=200, qty=0.05 → loss = (200 - 50) * 0.05 = $7.50 > $5 cap
+        # but notional = 50 * 0.05 = $2.50 < min_notional $10 → dust, cannot sell.
+        fake._prices["SOL/USDT"] = Decimal("50.00")
+        mock_binance_cls.return_value = fake
+
+        from src.agents.portfolio_monitor import PortfolioMonitor
+
+        state = state_with_open_position(
+            symbol="SOL/USDT", quantity=Decimal("0.05"),
+            avg_entry_price=Decimal("200.00"),
+            stop_loss_price=Decimal("40.00"),
+        )
+
+        result = PortfolioMonitor().check_exits_only(state)
+
+        auto_exits = [t for t in result.get("proposed_trades", []) if getattr(t, "is_auto_exit", False)]
+        assert len(auto_exits) == 0, "dust position must be skipped even if over loss cap"
