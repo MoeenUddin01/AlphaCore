@@ -17,6 +17,7 @@ from filelock import FileLock, Timeout
 
 from src.agents import run_cycle
 from src.agents.agent_state import AgentState, ProposedTrade
+from src.agents.portfolio_monitor import hard_loss_cap_breached as _hard_loss_cap_breached
 from src.data.binance_client import BinanceClient
 from src.data.data_pipeline import DataPipeline
 from src.database.connection import check_db_connection, get_db, init_db
@@ -298,11 +299,17 @@ def run_exit_check() -> None:
 
             hit_sl = sl_price > Decimal("0") and current_price <= sl_price
             hit_tp = tp_price > Decimal("0") and current_price >= tp_price
+            hit_loss_cap = _hard_loss_cap_breached(qty, entry_price, current_price)
 
-            if not hit_sl and not hit_tp:
+            if not hit_sl and not hit_tp and not hit_loss_cap:
                 continue
 
-            reason = "stop loss" if hit_sl else "take profit"
+            if hit_loss_cap:
+                reason = "hard loss cap"
+            elif hit_sl:
+                reason = "stop loss"
+            else:
+                reason = "take profit"
             pnl_pct = (
                 ((current_price - entry_price) / entry_price * 100)
                 if entry_price > 0
@@ -331,6 +338,14 @@ def run_exit_check() -> None:
                     symbol, exc,
                 )
 
+            reasoning = f"AUTO-EXIT: {reason} triggered at {float(current_price):.2f}"
+            if hit_loss_cap:
+                loss_usd = (entry_price - current_price) * qty
+                reasoning = (
+                    f"AUTO-EXIT: {reason} — unrealised loss "
+                    f"${float(loss_usd):.2f} > cap ${float(settings.MAX_LOSS_PER_TRADE_USD):.2f}"
+                )
+
             auto_exit = ProposedTrade(
                 symbol=symbol,
                 side="SELL",
@@ -339,9 +354,7 @@ def run_exit_check() -> None:
                 stop_loss_price=sl_price,
                 take_profit_price=tp_price,
                 signal_confidence=1.0,
-                reasoning=(
-                    f"AUTO-EXIT: {reason} triggered at {float(current_price):.2f}"
-                ),
+                reasoning=reasoning,
                 is_sentiment_driven=False,
                 is_auto_exit=True,
                 trade_origin="bot_auto_exit",

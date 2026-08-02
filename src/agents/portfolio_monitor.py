@@ -19,6 +19,53 @@ from src.utils.logger import get_logger
 _logger = get_logger(__name__)
 
 
+def compute_unrealised_loss(
+    qty: Decimal,
+    avg_entry: Decimal,
+    current_price: Decimal,
+) -> Decimal:
+    """Return the unrealised loss (positive USD) on a position.
+
+    Positive result means the position is losing money; a negative or
+    zero result means breakeven or profit.
+
+    Args:
+        qty: Position quantity in the base asset.
+        avg_entry: Average entry price in the quote asset.
+        current_price: Current market price.
+
+    Returns:
+        Unrealised loss in USD (``(avg_entry - current_price) * qty``).
+    """
+    return (avg_entry - current_price) * qty
+
+
+def hard_loss_cap_breached(
+    qty: Decimal,
+    avg_entry: Decimal,
+    current_price: Decimal,
+) -> bool:
+    """Whether the position exceeds the configured hard per-trade loss cap.
+
+    Independent of SL/TP: this only compares the unrealised loss against
+    ``settings.MAX_LOSS_PER_TRADE_USD``. A cap of 0 disables the check.
+
+    Args:
+        qty: Position quantity in the base asset.
+        avg_entry: Average entry price.
+        current_price: Current market price.
+
+    Returns:
+        True if the unrealised loss exceeds the hard cap.
+    """
+    cap = settings.MAX_LOSS_PER_TRADE_USD
+    if cap <= 0:
+        return False
+    if qty <= 0 or avg_entry <= 0 or current_price <= 0:
+        return False
+    return compute_unrealised_loss(qty, avg_entry, current_price) > cap
+
+
 class PortfolioMonitor:
     """Live portfolio tracker — P&L, drawdown, and rebalance triggers."""
 
@@ -219,8 +266,9 @@ class PortfolioMonitor:
 
             hit_sl = sl_price > Decimal("0") and current_price <= sl_price
             hit_tp = tp_price > Decimal("0") and current_price >= tp_price
+            hit_loss_cap = hard_loss_cap_breached(qty, entry_price, current_price)
 
-            if not hit_sl and not hit_tp:
+            if not hit_sl and not hit_tp and not hit_loss_cap:
                 continue
 
             # Skip dust positions that cannot be sold (below MIN_NOTIONAL)
@@ -243,8 +291,21 @@ class PortfolioMonitor:
                     symbol, exc,
                 )
 
-            reason = "stop loss" if hit_sl else "take profit"
+            if hit_loss_cap:
+                reason = "hard loss cap"
+            elif hit_sl:
+                reason = "stop loss"
+            else:
+                reason = "take profit"
             pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else Decimal("0")
+
+            loss_usd = compute_unrealised_loss(qty, entry_price, current_price)
+            reasoning = f"AUTO-EXIT: {reason} triggered at {float(current_price):.2f}"
+            if hit_loss_cap:
+                reasoning = (
+                    f"AUTO-EXIT: {reason} — unrealised loss "
+                    f"${float(loss_usd):.2f} > cap ${float(settings.MAX_LOSS_PER_TRADE_USD):.2f}"
+                )
 
             auto_exit = ProposedTrade(
                 symbol=symbol,
@@ -254,7 +315,7 @@ class PortfolioMonitor:
                 stop_loss_price=sl_price,
                 take_profit_price=tp_price,
                 signal_confidence=1.0,
-                reasoning=f"AUTO-EXIT: {reason} triggered at {float(current_price):.2f}",
+                reasoning=reasoning,
                 is_sentiment_driven=False,
                 is_auto_exit=True,
                 trade_origin="bot_auto_exit",

@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     TRADING_FEE_PCT: float = 0.001
     TRADING_PAUSED: bool = False
 
+    MAX_LOSS_PER_TRADE_USD: Decimal = Decimal("5")
+    """Hard per-trade loss cap (USD) — independent safety layer below SL/TP.
+
+    Evaluated on every exit check alongside stop-loss / take-profit. If a
+    position's unrealised loss exceeds this amount, an exit is forced
+    immediately regardless of what the regular SL/TP thresholds say — so a
+    missed SL trigger, gap move, or slippage cannot turn into a
+    catastrophic single-trade loss. Set to 0 to disable. Default $5 (a
+    historical ADA exit lost -$15.46, so this bounds such losses ~3x tighter).
+    """
+
     TRADING_PAIRS: Annotated[Json[list[str]], BeforeValidator(_parse_trading_pairs)] = '["BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","ADA/USDT"]'
 
     MODEL_CHECKPOINT_DIR: str = "./models_saved"
