@@ -7,7 +7,9 @@ stays in ``running`` state beyond the expected duration, the process is
 restarted instead of being left to freeze silently.
 
 The file is deliberately a plain JSON blob written atomically so the
-watchdog (a separate shell process) can read it safely.
+watchdog (a separate shell process) can read it safely. Every write
+also stamps the writer's ``pid``, letting the watchdog distinguish the
+actively-heartbeating process from stale/dead instances.
 """
 
 import json
@@ -45,7 +47,13 @@ def _read() -> dict[str, Any]:
 
 
 def _write(data: dict[str, Any]) -> None:
-    """Atomically write *data* to the heartbeat file (tmp + rename)."""
+    """Atomically write *data* to the heartbeat file (tmp + rename).
+
+    Always stamps the writing process's PID into the file so the
+    watchdog can tell which instance actually owns the heartbeat and
+    must never be killed in favour of a stale zombie.
+    """
+    data["pid"] = os.getpid()
     tmp = f"{_HEARTBEAT_FILE}.tmp"
     try:
         os.makedirs(settings.DATA_CACHE_DIR, exist_ok=True)

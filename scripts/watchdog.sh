@@ -15,25 +15,98 @@ HEARTBEAT_FILE="$PROJECT_DIR/data_cache/.trade_heartbeat.json"
 HB_MAX_AGE=900
 CYCLE_MAX_RUN=600
 
-# Helper: kill all but the oldest PID for a given pattern
+# Helper: print the PID that owns the (fresh) heartbeat file, or 0 if
+# the heartbeat is missing/unreadable/stale. A healthy, actively
+# heartbeating process is authoritative and must never be killed in
+# favour of an older zombie/defunct process.
+heartbeat_owner_pid() {
+    "$VENV_PYTHON" - "$HEARTBEAT_FILE" "$HB_MAX_AGE" <<'PYEOF'
+import json, os, sys
+path, hb_max_age = sys.argv[1], int(sys.argv[2])
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+now = __import__("time").time()
+age = now - float(data.get("last_activity", 0))
+if age > hb_max_age:
+    sys.exit(0)
+pid = data.get("pid", 0)
+if isinstance(pid, int) and pid > 0:
+    print(pid)
+PYEOF
+}
+
+# Helper: 0 (alive) if the PID exists in the process table AND is not a
+# zombie/defunct process (state Z in /proc/<pid>/stat). A dead-but-
+# unreaped zombie still "exists" for pgrep/kill purposes, so state must
+# be checked explicitly.
+pid_is_zombie() {
+    local pid="$1"
+    [ -r "/proc/$pid/stat" ] || return 1
+    # state is the char right after the closing paren of the comm field
+    local state
+    state=$(sed -n 's/^.*) \([A-Z]\).*$/\1/p' "/proc/$pid/stat" 2>/dev/null)
+    [ "$state" = "Z" ]
+}
+
+# Helper: kill all but the healthiest instance of a process pattern.
+# Uses the heartbeat file to identify the authoritative process for the
+# trade scheduler; for other patterns (no heartbeat) it keeps the oldest
+# non-zombie PID. A zombie/defunct process is NEVER preferred over a
+# healthy one, regardless of PID age.
 kill_extras() {
     local pattern="$1"
+    local use_heartbeat="${2:-0}"
     local pids
     pids=$(pgrep -f "$pattern" 2>/dev/null || true)
     local count
-    count=$(echo "$pids" | grep -c . 2>/dev/null || echo 0)
+    count=$(printf '%s\n' "$pids" | grep -c . 2>/dev/null)
+    count=${count:-0}
     if [ "$count" -gt 1 ]; then
-        # Keep the oldest (first PID), kill the rest
-        local keep
-        keep=$(echo "$pids" | head -1)
-        local extras
-        extras=$(echo "$pids" | tail -n +2)
-        echo "$(date '+%Y-%m-%d %H:%M:%S') WARNING: $count instances of '$pattern' running — killing extras: $extras"
+        local keep=""
+        # 1) The actively-heartbeating process is authoritative (never a zombie).
+        if [ "$use_heartbeat" = "1" ] && [ -f "$HEARTBEAT_FILE" ]; then
+            local hb_pid
+            hb_pid=$(heartbeat_owner_pid)
+            if [ -n "$hb_pid" ] \
+                && echo "$pids" | grep -qx "$hb_pid" \
+                && ! pid_is_zombie "$hb_pid"; then
+                keep="$hb_pid"
+            fi
+        fi
+        # 2) Otherwise keep the oldest NON-zombie instance (never a zombie).
+        if [ -z "$keep" ]; then
+            for pid in $pids; do
+                if ! pid_is_zombie "$pid"; then
+                    keep="$pid"
+                    break
+                fi
+            done
+        fi
+        # 3) Only if EVERY instance is a zombie do we keep one (to avoid
+        #    killing everything); the zombie will be reaped and restarted.
+        if [ -z "$keep" ]; then
+            keep=$(echo "$pids" | head -1)
+        fi
+        local extras=""
+        for pid in $pids; do
+            if [ "$pid" != "$keep" ]; then
+                extras="$extras $pid"
+            fi
+        done
+        echo "$(date '+%Y-%m-%d %H:%M:%S') WARNING: $count instances of '$pattern' running — keeping PID $keep, killing: $extras"
         for pid in $extras; do
             kill "$pid" 2>/dev/null || true
         done
     fi
 }
+
+# Kill extras for each service type (trade uses the heartbeat to decide
+# which instance is authoritative; real-account daemon has no heartbeat).
+kill_extras "main.py --mode trade" 1
+kill_extras "main_real.py" 0
 
 # Helper: detect a hung (frozen but alive) trade process via heartbeat.
 # Returns 0 (hung) if:
@@ -63,10 +136,6 @@ if data.get("cycle_state") == "running":
 sys.exit(1)
 PYEOF
 }
-
-# Kill extras for each service type
-kill_extras "main.py --mode trade"
-kill_extras "main_real.py"
 
 # Check API
 if ! pgrep -f "main.py --mode api" > /dev/null 2>&1; then
