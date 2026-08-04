@@ -1,0 +1,11 @@
+{
+  "train_loss": 0.692059819012472,
+  "val_loss": 0.7244046926498413,
+  "test_loss": 0.8632369306352403,
+  "test_accuracy_pct": 47.43,
+  "up_correct": 129,
+  "up_total": 129,
+  "down_correct": 0,
+  "down_total": 143,
+  "test_samples": 272
+}

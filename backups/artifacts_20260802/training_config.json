@@ -1,0 +1,24 @@
+{
+  "feature_cols": [
+    "rsi",
+    "macd",
+    "macd_signal",
+    "bb_upper",
+    "bb_middle",
+    "bb_lower",
+    "atr",
+    "ema_20",
+    "ema_50",
+    "returns",
+    "log_returns",
+    "volatility"
+  ],
+  "target_cols": [
+    "direction",
+    "target_vol_regime"
+  ],
+  "seq_len": 24,
+  "epochs": 50,
+  "batch_size": 32,
+  "learning_rate": 0.001
+}
