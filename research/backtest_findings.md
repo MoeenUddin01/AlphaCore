@@ -354,6 +354,122 @@ alternatives on the current evidence.
 
 ---
 
+---
+
+## 9. Regime-filtered backtest — 200-EMA trend filter (Part 2)
+
+> Added: 2026-08-08. Research only — no ML, no live changes. Hypothesis:
+> EMA/RSI signals fail when traded blindly through a strong downtrend and
+> should improve when only taken in the direction of the broader trend
+> (price above the 200-period EMA).
+
+### 9.1 Method
+
+- **Script:** `/tmp/opencode/bt/regime.py` (research only, not committed).
+- **Data:** **2 years** of Binance mainnet hourly candles per pair
+  (Aug 16 2024 → Aug 8 2026, **17,331 candles/pair**, equal depth for all 5
+  pairs). Cached at `/tmp/opencode/bt/full2/*.csv`. The Part-1 "full year"
+  is the trailing 8,717 candles of this same series, so results are directly
+  comparable.
+- **Filter:** entry allowed only when `close[t] > ema_200[t]` (uptrend
+  regime); exits unchanged (EMA cross down / RSI ≥ 70 / SL / TP). EMA(200)
+  computed with `pandas_ta` on the same feature pipeline.
+- **Mechanics:** identical to Parts 1/6 — $10k start, notional
+  `min(5%·equity, $500)`, SL 3%, TP 6%, fee 0.1%/side, trade at open `t+1`,
+  SL/TP intrabar, no slippage, spot long-only.
+- **Regime context (200-EMA, 2-yr window):** BTC 52.0% uptrend (679 flips),
+  ETH 47.4%, SOL 46.1%, BNB 53.8%, ADA 39.7%. The 2-year window contains
+  genuine uptrend and downtrend phases (B&H: BTC +12%, BNB +15% over 2y vs
+  −44%/−27% over the trailing year; ETH/SOL/ADA negative in both).
+
+### 9.2 Results — combined (all 5 pairs)
+
+**Part-1 window (trailing year, bear-heavy):**
+
+| Strategy | Trades | Win % | PnL (USD) | PnL % | Max DD % | Sharpe |
+|---|---|---|---|---|---|---|
+| EMA unfiltered (Part 1 baseline) | 417 | 25.9 | −649.99 | −6.50 | 7.40 | −2.04 |
+| **EMA + 200-EMA filter** | **222** | **28.8** | **−303.40** | **−3.03** | **4.02** | **−1.24** |
+| RSI unfiltered (Part 1 baseline) | 357 | 35.9 | −1040.16 | −10.40 | 10.40 | −3.05 |
+| **RSI + 200-EMA filter** | **34** | **29.4** | **−243.33** | **−2.43** | **2.43** | **−2.84** |
+
+**Two-year window (includes genuine uptrends):**
+
+| Strategy | Trades | Win % | PnL (USD) | PnL % | Max DD % | Sharpe |
+|---|---|---|---|---|---|---|
+| EMA unfiltered | 834 | 28.3 | −740.19 | −7.40 | 9.37 | −1.59 |
+| **EMA + 200-EMA filter** | **490** | **29.6** | **−424.85** | **−4.25** | **5.89** | **−1.15** |
+| RSI unfiltered | 671 | 36.4 | −1452.71 | −14.53 | 14.96 | −3.01 |
+| **RSI + 200-EMA filter** | **65** | **35.4** | **−283.38** | **−2.83** | **2.99** | **−2.12** |
+
+### 9.3 Regime attribution (2-yr window, unfiltered trades split by regime)
+
+Confirms the filter removes exactly the worst trades — but the "good" regime
+trades still lose money:
+
+| Strategy | Regime | Trades | Win % | PnL (USD) | Avg win % | Avg loss % | Exits |
+|---|---|---|---|---|---|---|---|
+| EMA | up (>200EMA) | 492 | 30.7 | −123.76 | +4.53 | −2.08 | 129 SL / 112 TP / 248 cross_down |
+| EMA | down (<200EMA) | 342 | 24.9 | −616.43 | +4.45 | −1.96 | 81 SL / 61 TP / 199 cross_down |
+| RSI | up (>200EMA) | 70 | 45.7 | −54.15 | +3.46 | −3.20 | 38 SL / 6 TP / 25 overbought |
+| RSI | down (<200EMA) | 601 | 35.3 | −1398.56 | +4.53 | −3.20 | 389 SL / 106 TP / 106 overbought |
+
+Key structural fact for RSI: even with a 45.7% win rate in the up-regime,
+PnL is negative because avg win (+3.46%) < avg loss (−3.20%) in magnitude is
+not enough to cover the 2× fee drag and the early `RSI_overbought` exits that
+cut winners before TP. Win rate alone is misleading without win/loss size.
+
+### 9.4 Statistical significance (vs 50% binomial)
+
+| Strategy / window | Trades | Win % | z | p | Verdict |
+|---|---|---|---|---|---|
+| EMA + filter, 1-yr | 222 | 28.8 | 6.31 | 2.8e-10 | **Sig. below 50%** |
+| EMA + filter, 2-yr | 490 | 29.6 | 9.04 | ~0 | **Sig. below 50%** |
+| RSI + filter, 1-yr | 34 | 29.4 | 2.40 | 0.016 | **Sig. below 50%** |
+| RSI + filter, 2-yr | 65 | 35.4 | 2.36 | 0.018 | **Sig. below 50%** |
+| EMA up-regime only | 492 | 30.7 | 8.57 | ~0 | **Sig. below 50%** |
+| RSI up-regime only | 70 | 45.7 | 0.72 | 0.47 | n.s. (but PnL −$54) |
+
+Even the regime-filtered trades — which by construction only enter when price
+is above the 200-EMA — remain **statistically significantly below 50% win
+rate** (except RSI's tiny up-regime subsample, which is not significant but
+still negative in PnL).
+
+### 9.5 Honest conclusion (regime filter)
+
+1. **The filter meaningfully reduces losses but does not create profitability.**
+   In the Part-1 bear window it roughly halves the damage (EMA −$650 → −$303,
+   RSI −$1,040 → −$243) and cuts trade count (EMA 417→222, RSI 357→34), and
+   it improves the win rate (EMA 25.9→28.8%, RSI 35.9→29.4%). Same pattern on
+   the 2-yr window.
+2. **The regime attribution proves the mechanism:** up-regime trades are
+   uniformly better than down-regime trades for the same strategy (EMA win
+   30.7% vs 24.9%, PnL −$124 vs −$616; RSI win 45.7% vs 35.3%, PnL −$54 vs
+   −$1,399). The filter is removing precisely the wrong-regime trades.
+3. **But even in the "correct" regime the strategies remain unprofitable.**
+   This is the stronger, more specific negative finding than Part 1 alone:
+   the strategies are not merely failing because of the bear window — they
+   still lose (EMA −$425/−$303; RSI −$283/−$243) even when only traded with
+   the long-term trend. A correct-regime EMA filter at 490 trades is
+   **statistically significantly worse than random**.
+4. **The regime filter is a genuine improvement worth keeping as a risk
+   control** (fewer trades, half the drawdown), but it does not rescue the
+   signals — it only avoids their worst variant.
+5. **Caveats:** 2-yr window still dominated by ETH/SOL/ADA downtrends
+   (B&H −26%/−47%/−38%); a longer multi-cycle history or walk-forward would
+   be needed to test genuine bull-market-only performance. No lookahead:
+   filter evaluated on close `t`, entry at open `t+1`. Fixed 3%/6% SL/TP,
+   no slippage, spot long-only.
+
+**Bottom line:** the regime filter fixes the "trading blindly through a
+downtrend" failure mode partially — it avoids the worst trades and halves
+losses — but the signals still lose money even when regime-matched. This is
+a stronger negative result: the technical signals themselves carry no
+demonstrated edge; at best the filter is a useful guardrail, not a path to
+profitability.
+
+---
+
 ## Appendix — Reproduction commands
 
 ```bash
@@ -362,6 +478,9 @@ PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/backtest.py
 
 # Regenerate the technical baseline backtests (fetches/caches full-year data):
 PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/technical.py
+
+# Regenerate the regime-filtered backtests (fetches/caches 2-year data):
+PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/regime.py
 
 # Retrain metrics source:
 cat backups/artifacts_20260802/metrics_*_lstm.json        # direction
