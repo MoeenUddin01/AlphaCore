@@ -470,6 +470,120 @@ profitability.
 
 ---
 
+---
+
+## 10. Exit-structure variants — do wider reward:risk targets fix the payoff asymmetry?
+
+> Added: 2026-08-08. Research only — no live changes. Hypothesis from
+> Section 9: even regime-matched entries lose because avg win < |avg loss|
+> (payoff asymmetry), not because the entries lack directional tendency.
+> Test: widen reward:risk by changing **only the exit structure**, keeping
+> the Section 9 regime-filtered entries (200-EMA filter, 2-yr window)
+> byte-identical.
+
+### 10.1 Method
+
+- **Script:** `/tmp/opencode/bt/exits.py` (research only, not committed).
+- **Baseline:** Section 9's regime-filtered EMA/RSI results (2-yr window).
+- **Entries:** identical to Section 9 — same crossing rules, same 200-EMA
+  filter, same `open[t+1]` execution, same SL 3%, fee 0.1%/side, notional
+  `min(5%·equity, $500)`, $10k start, spot long-only.
+- **Variants** (only the profit-taking logic differs):
+  - **TP9:** fixed TP 9%, SL 3% (~3:1 reward:risk).
+  - **TP12:** fixed TP 12%, SL 3% (~4:1).
+  - **TRAIL 3/3:** no fixed TP; trailing stop activates at +3% in favour and
+    trails 3% below peak; SL 3% unchanged.
+- **Strategy exits kept for all variants** (EMA cross-down / RSI ≥ 70), so
+  the only structural change is the TP/trailing layer.
+- **Parity check:** TP6 variant reproduces Section 9 exactly
+  (EMA 490/−$424.85, RSI 65/−$283.38) — confirms entries are identical.
+
+### 10.2 Results — EMA + 200-EMA filter (2-yr, all pairs combined)
+
+| Variant | Trades | Win % | PnL (USD) | PnL % | Max DD % | Avg win % | Avg loss % | Payoff (W/L) | Expectancy %/trade |
+|---|---|---|---|---|---|---|---|---|---|
+| TP6 (Sec 9 baseline) | 490 | 29.6 | −424.85 | −4.25 | 5.89 | +4.45 | −2.12 | 2.10 | −0.174 |
+| TP9 | 490 | 27.8 | −327.28 | −3.27 | 5.02 | +4.98 | −2.10 | 2.37 | −0.134 |
+| TP12 | 490 | 27.8 | −267.62 | −2.68 | 4.25 | +5.07 | −2.10 | 2.42 | −0.109 |
+| TRAIL 3/3 | 490 | 37.6 | −929.98 | −9.30 | 9.92 | +2.44 | −2.08 | 1.17 | −0.383 |
+
+Exits (EMA): TP6 → 135 SL / 105 TP / 247 cross_down; TP9 → 137 SL / 63 TP /
+287 cross_down; TP12 → 137 SL / 40 TP / 310 cross_down; TRAIL → 116 SL /
+185 TRAIL / 187 cross_down.
+
+### 10.3 Results — RSI + 200-EMA filter (2-yr, all pairs combined)
+
+| Variant | Trades | Win % | PnL (USD) | PnL % | Max DD % | Avg win % | Avg loss % | Payoff (W/L) | Expectancy %/trade |
+|---|---|---|---|---|---|---|---|---|---|
+| TP6 (Sec 9 baseline) | 65 | 35.4 | −283.38 | −2.83 | 2.99 | +3.37 | −3.20 | 1.05 | −0.873 |
+| TP9 | 65 | 35.4 | −238.57 | −2.39 | 2.54 | +3.76 | −3.20 | 1.18 | −0.735 |
+| TP12 | 65 | 35.4 | −214.36 | −2.14 | 2.30 | +3.97 | −3.20 | 1.24 | −0.660 |
+| TRAIL 3/3 | 65 | 38.5 | −298.55 | −2.99 | 3.20 | +2.35 | −2.96 | 0.79 | −0.921 |
+
+Exits (RSI): TP6 → 42 SL / 4 TP / 19 overbought; TP9 → 42 SL / 2 TP /
+21 overbought; TP12 → 42 SL / 1 TP / 22 overbought; TRAIL → 37 SL /
+12 TRAIL / 16 overbought.
+
+### 10.4 What the exit mix reveals
+
+- **EMA: the `EMA_cross_down` exit is the real profit cap, not the fixed TP.**
+  247–310 of 490 trades end on the trend-following exit (far more than TP/SL).
+  Widening TP to 9–12% therefore only helps the ~40–105 trades that actually
+  reach TP; most winners still exit on the cross-down at whatever gain the
+  market offered. Hence avg win rises modestly (+4.45% → +5.07%) and the
+  win rate *falls* (29.6% → 27.8%) as the harder-to-reach target converts
+  some would-be TP winners into cross-down exits or stops.
+- **RSI: the `RSI_overbought` exit fires before TP on almost every winner.**
+  Only 4/65 trades ever reached TP6 (2 at TP9, 1 at TP12). The mean-reversion
+  exit (RSI ≥ 70) cuts winners at ~+3.4% regardless of TP width, so widening
+  the target is structurally almost ineffective for RSI — the payoff barely
+  moves (1.05 → 1.24) and the win rate is flat.
+- **TRAIL 3/3 is strictly worse for both.** Giving back 3% from peak turns
+  winners into small gains (EMA avg win drops to +2.44%; payoff 1.17) and
+  doubles EMA's drawdown; RSI's payoff falls below 1 (0.79).
+
+### 10.5 Statistical significance (vs 50% binomial)
+
+| Variant | Trades | Win % | z | p | Verdict |
+|---|---|---|---|---|---|
+| EMA TP9 | 490 | 27.8 | 9.85 | ~0 | **Sig. below 50%** |
+| EMA TP12 | 490 | 27.8 | 9.85 | ~0 | **Sig. below 50%** |
+| EMA TRAIL | 490 | 37.6 | 5.51 | 3.6e-8 | **Sig. below 50%** |
+| RSI TP12 | 65 | 35.4 | 2.36 | 0.018 | **Sig. below 50%** |
+
+Break-even win rates (avg loss / (avg win + avg loss)): EMA TP6 32.3%,
+TP12 29.3%, TRAIL 46.0%; RSI TP6 48.7%, TP12 44.6%. All variants' actual win
+rates sit below their own break-even — none crosses the profitability line.
+
+### 10.6 Honest conclusion (wider reward:risk)
+
+1. **Widening the target does not turn any variant profitable.** The best
+   case (EMA TP12) cuts the loss to −$268 (−37% vs TP6 baseline) and lifts
+   payoff to 2.42, but expectancy stays negative (−0.109%/trade) and the win
+   rate remains **significantly below 50%** (z=9.85, p≈0).
+2. **The asymmetry does start to flip on paper but the win-rate tradeoff
+   eats it.** EMA payoff rises 2.10 → 2.42 and avg win > |avg loss| grows,
+   yet the win rate drops 29.6% → 27.8% because 9–12% targets are rarely hit
+   before the strategy's own exit. Net effect: still negative.
+3. **For RSI the TP width is close to irrelevant** — the `RSI_overbought`
+   exit caps winners at ~+3.4% long before any target. The RSI failure mode is
+   therefore the *exit rule itself*, not the take-profit level; a wider TP
+   cannot fix it. Only 1–4 of 65 trades ever reach TP.
+4. **Trailing stops make things worse**, not better: 3% trailing from a +3%
+   activation gives back too much, collapses avg win (EMA +2.44%) and doubles
+   EMA drawdown (9.92%). RSI payoff drops below 1.
+5. **Bottom line:** the hypothesis "entries have direction, only payoff is
+   wrong" is **not supported in a way that makes money.** Wider targets reduce
+   losses (a real but limited effect) and confirm the entry directionality is
+   at least slightly positive, but the win-rate penalty of harder targets,
+   plus strategy-exit capping, leaves every variant unprofitable and
+   statistically below random. Fixing RSI profitability would require changing
+   the `RSI_overbought` exit (outside this experiment's scope); fixing EMA
+   would need a genuine win-rate edge, which the 490-trade sample shows it
+   does not have.
+
+---
+
 ## Appendix — Reproduction commands
 
 ```bash
@@ -481,6 +595,9 @@ PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/technical.py
 
 # Regenerate the regime-filtered backtests (fetches/caches 2-year data):
 PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/regime.py
+
+# Regenerate the exit-structure variants (Section 10):
+PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/exits.py
 
 # Retrain metrics source:
 cat backups/artifacts_20260802/metrics_*_lstm.json        # direction
