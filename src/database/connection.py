@@ -11,6 +11,7 @@ from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.utils.config import settings
+from src.utils.helpers import retry_with_backoff
 from src.utils.logger import get_logger
 
 _logger = get_logger(__name__)
@@ -19,9 +20,28 @@ engine = create_engine(
     settings.DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
+    pool_recycle=240,
+    connect_args={"connect_timeout": 10},
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+@retry_with_backoff(max_retries=3, base_delay=1.0)
+def _acquire_session() -> Session:
+    """Create a session and force a live connection before yielding it.
+
+    Running a trivial ``SELECT 1`` during acquisition makes transient
+    connect failures (e.g. Neon scale-to-zero cold starts) surface here,
+    where they can be retried with backoff, instead of inside the caller's
+    transaction.
+
+    Returns:
+        A :class:`sqlalchemy.orm.Session` backed by a verified connection.
+    """
+    session = SessionLocal()
+    session.execute(text("SELECT 1"))
+    return session
 
 
 class Base(DeclarativeBase):
@@ -39,7 +59,7 @@ def get_db() -> Iterator[Session]:
     Yields:
         A :class:`sqlalchemy.orm.Session` ready for queries.
     """
-    db = SessionLocal()
+    db = _acquire_session()
     try:
         yield db
         db.commit()

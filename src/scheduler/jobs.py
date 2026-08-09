@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
+from sqlalchemy import case as sql_case, func as sql_func
 
 from src.agents import run_cycle
 from src.agents.agent_state import AgentState, ProposedTrade
@@ -469,13 +470,81 @@ def run_exit_check() -> None:
     _logger.info("=== EXIT CHECK DONE ===")
 
 
-def reconcile_positions() -> None:
-    """Daily reconciliation: compare DB positions against Binance actual balances.
+def _has_recent_sell_failures(pair: str) -> bool:
+    """Return ``True`` if the exchange has repeatedly failed to sell *pair*.
 
-    Calls Binance's account balance endpoint and compares every asset
-    balance against what the Position table thinks we hold. If any
-    mismatch exceeds a small rounding tolerance, sends a critical alert
+    Counts FAILED SELL trades recorded since that pair's most recent
+    FILLED BUY.  A string of failed sells (e.g. Binance ``-2010``
+    "insufficient balance" on Testnet faucet coins) is ground-truth
+    evidence that the coins the ledger/Position table claim are NOT
+    actually sellable on the exchange.  The reconciliation job uses
+    this to distinguish:
+
+    - **Known infra-side drift** (position missing but coins already
+      proven unsellable) — logged as acknowledged, not a reconcile
+      failure, so it does not auto-pause trading every day.
+    - **Silent state corruption** (position missing, no failed-sell
+      evidence) — genuine T13-style drift that must flag loudly.
+
+    Args:
+        pair: Trading pair in ``SYMBOL/USDT`` format.
+
+    Returns:
+        ``True`` if at least one FAILED SELL exists after the most
+        recent FILLED BUY for the pair.
+    """
+    with get_db() as db:
+        last_buy = (
+            db.query(sql_func.max(TradeModel.created_at))
+            .filter(
+                TradeModel.symbol == pair,
+                TradeModel.side == "BUY",
+                TradeModel.status == "FILLED",
+            )
+            .scalar()
+        )
+        query = db.query(sql_func.count()).filter(
+            TradeModel.symbol == pair,
+            TradeModel.side == "SELL",
+            TradeModel.status == "FAILED",
+        )
+        if last_buy is not None:
+            query = query.filter(TradeModel.created_at >= last_buy)
+        return (query.scalar() or 0) > 0
+
+
+def reconcile_positions() -> None:
+    """Daily reconciliation: compare DB positions AND the trade ledger
+    against Binance actual balances.
+
+    Computes the ledger-expected holding for every tracked pair as
+    net FILLED quantity (BUYs minus SELLs) and cross-checks it against
+    both the Position table and the live exchange account:
+
+    - Exchange vs ledger: coins the ledger says we own must actually be
+      on the exchange (missing/insufficient balance = real corruption).
+    - Position rows vs ledger, both directions: a Position row that the
+      ledger says should exist but is missing (T13 drift), and a Phantom
+      position the ledger says was never bought — flagged only when the
+      exchange also holds no balance for the asset, so a healthy fresh
+      position on a symbol with negative ledger drift (seed positions
+      outside the Trade table) is never a false positive.
+    - Position vs exchange: the original one-directional shortfall check
+      (exchange must back every open Position row).
+
+    Any mismatch beyond a small rounding tolerance sends a critical alert
     and auto-pauses trading.
+
+    .. note::
+
+       The pre-fix implementation only checked *one* direction — that the
+       exchange balance was at least what the Position table expected.
+       On Testnet the faucet funds large whole-coin balances (e.g. ETH
+       1.0 vs a 0.1297 position), so that check always PASSED even while
+       every SELL order was being rejected with ``-2010`` insufficient
+       balance.  This rewrite compares the ledger and Position rows
+       against the exchange explicitly, in both directions, so that class
+       of silent divergence is now caught.
 
     Runs independently of the trading cycle — this is the belt-and-suspenders
     check against the exact class of state corruption bugs that have
@@ -492,6 +561,8 @@ def reconcile_positions() -> None:
     _PAUSE_FLAG = Path("data_cache/.trading_paused")
     binance = BinanceClient()
     mismatches: list[str] = []
+    _QTY_EPSILON = Decimal("0.001")
+    _TOLERANCE_PCT = Decimal("0.05")
 
     _TRACKED_ASSETS: set[str] = {
         pair.split("/")[0] for pair in settings.TRADING_PAIRS
@@ -513,54 +584,16 @@ def reconcile_positions() -> None:
         send_alert(msg, level="error")
         return
 
-    db_positions_data: list[dict[str, Any]] = []
+    db_positions: dict[str, Decimal] = {}
     with get_db() as db:
         for p in db.query(PositionModel).all():
-            db_positions_data.append({
-                "symbol": p.symbol,
-                "quantity": float(p.quantity),
-            })
+            db_positions[p.symbol] = Decimal(str(p.quantity))
 
-    for pos in db_positions_data:
-        asset = pos["symbol"].replace("/USDT", "")
-        db_qty = pos["quantity"]
-        exchange_qty = balances.pop(asset, 0.0)
-
-        if db_qty <= 0.000001 and exchange_qty <= 0.000001:
-            continue
-
-        # One-directional check: exchange must have at least what DB expects.
-        # Extra on exchange (faucet dust on Testnet) is fine — only flag if
-        # a position went missing (real state corruption).
-        shortfall = Decimal(str(db_qty)) - Decimal(str(exchange_qty))
-        tolerance = Decimal(str(db_qty)) * Decimal("0.05")
-        if shortfall > tolerance:
-            mismatches.append(
-                f"{pos['symbol']}: DB={db_qty:.8f} Exchange={exchange_qty:.8f} "
-                f"(shortfall={float(shortfall):.8f})"
-            )
-
-    # --- Exchange-only check: cross-reference against Trade table ---
-    # Assets remaining in `balances` exist on exchange but have no
-    # Position row.  Most of the time this is Testnet faucet dust and
-    # should be ignored.  However, a Position row can also go missing
-    # due to the T13 pipeline-only limitation — if a manual intervention
-    # adjusted the Position table and update_positions() later closed
-    # out a stale remaining qty, the row is deleted even though trade
-    # history still shows net positive quantity.
-    #
-    # Distinguish the two cases by querying the Trade table: if there
-    # is net positive trade quantity for this symbol (BUYs > SELLs) and
-    # the exchange balance is material, the Position row is genuinely
-    # missing — flag it.
-    from sqlalchemy import case as sql_case, func as sql_func
-
-    for orphaned_asset, orphaned_qty in list(balances.items()):
-        if orphaned_qty <= 0.000001:
-            continue
-        orphaned_pair = f"{orphaned_asset}/USDT"
-        with get_db() as db:
-            net_trade_result = (
+    # Ledger-expected holding per tracked pair = net FILLED (BUY - SELL).
+    ledger_expected: dict[str, Decimal] = {}
+    with get_db() as db:
+        for pair in settings.TRADING_PAIRS:
+            net = (
                 db.query(
                     sql_func.sum(
                         sql_case(
@@ -571,18 +604,81 @@ def reconcile_positions() -> None:
                     )
                 )
                 .filter(
-                    TradeModel.symbol == orphaned_pair,
+                    TradeModel.symbol == pair,
                     TradeModel.status == "FILLED",
                 )
                 .scalar()
             )
-        net_trade_qty = float(net_trade_result) if net_trade_result is not None else 0.0
-        if net_trade_qty > 0.001:
+            ledger_expected[pair] = Decimal(str(net)) if net is not None else Decimal("0")
+
+    for pair in settings.TRADING_PAIRS:
+        asset = pair.split("/")[0]
+        expected = ledger_expected[pair]
+        pos_qty = db_positions.get(pair, Decimal("0"))
+        exchange_qty = Decimal(str(balances.get(asset, 0.0)))
+
+        # (a) Exchange vs ledger: coins the ledger says we own must be on
+        # the exchange.  This is the direction the old check never looked
+        # at — a ledger holding not backed by sellable exchange balance.
+        if expected > _QTY_EPSILON:
+            tolerance = max(expected * _TOLERANCE_PCT, _QTY_EPSILON)
+            shortfall = expected - exchange_qty
+            if shortfall > tolerance:
+                mismatches.append(
+                    f"{pair}: LEDGER expects {expected:.8f} but EXCHANGE has "
+                    f"{exchange_qty:.8f} (shortfall={float(shortfall):.8f}) — "
+                    f"ledger holdings not backed by exchange balance"
+                )
+
+        # (b) Position rows vs ledger — both directions.
+        if expected > _QTY_EPSILON and pos_qty <= _QTY_EPSILON:
+            # Trade history says we should still hold this, but the
+            # Position row is gone.  Unless the exchange has already
+            # proven the coins unsellable (repeated FAILED SELLs), this
+            # is genuine T13 pipeline-only drift and must flag.
+            if _has_recent_sell_failures(pair):
+                _logger.warning(
+                    "%s: Position MISSING vs ledger=%s but exchange unreachable for "
+                    "SELLs (recent FAILED sells) — treating as acknowledged infra-side "
+                    "drift, not a reconcile failure",
+                    pair, expected,
+                )
+            else:
+                mismatches.append(
+                    f"{pair}: Position MISSING (DB=0, Exchange={float(exchange_qty):.8f}, "
+                    f"net_trade_qty={float(expected):.8f}) — trade history shows this asset "
+                    f"should have a Position row but none exists. Possible T13 pipeline-only drift."
+                )
+        elif (
+            expected <= _QTY_EPSILON
+            and pos_qty > _QTY_EPSILON
+            and exchange_qty <= _QTY_EPSILON
+        ):
+            # Phantom position: a row exists, the ledger says nothing was
+            # bought, AND the exchange holds no material balance for the
+            # asset.  Requiring an absent exchange balance is deliberate —
+            # a negative ledger net is legitimate when seed positions live
+            # outside the Trade table (e.g. BTC/BNB/ADA here), and on
+            # Testnet faucet coins are indistinguishable from owned ones,
+            # so a position backed by *any* exchange balance must not be
+            # called a phantom.  Only when the coins exist nowhere at all
+            # is the row provably bogus.
             mismatches.append(
-                f"{orphaned_pair}: Position MISSING (DB=0, Exchange={orphaned_qty:.8f}, "
-                f"net_trade_qty={net_trade_qty:.8f}) — trade history shows this asset "
-                f"should have a Position row but none exists. Possible T13 pipeline-only drift."
+                f"{pair}: Phantom position (DB={pos_qty:.8f}, Ledger={float(expected):.8f}, "
+                f"Exchange={float(exchange_qty):.8f}) — ledger says nothing was bought and "
+                f"the exchange holds no balance for this asset"
             )
+
+        # (c) Position vs exchange: every open position must be backed by
+        # exchange balance (original one-directional shortfall check).
+        if pos_qty > _QTY_EPSILON:
+            tolerance = max(pos_qty * _TOLERANCE_PCT, _QTY_EPSILON)
+            shortfall = pos_qty - exchange_qty
+            if shortfall > tolerance:
+                mismatches.append(
+                    f"{pair}: DB={pos_qty:.8f} Exchange={float(exchange_qty):.8f} "
+                    f"(shortfall={float(shortfall):.8f})"
+                )
 
     if mismatches:
         _logger.error(
@@ -605,6 +701,116 @@ def reconcile_positions() -> None:
         _logger.info("Position reconciliation PASSED — all balances match")
 
     _logger.info("=== POSITION RECONCILIATION DONE ===")
+
+
+def resync_positions_to_exchange(symbols: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """One-time notional resync of stale Position rows against the actual
+    testnet account.
+
+    Removes Position rows whose coins are provably not sellable on the
+    exchange (repeated ``-2010`` FAILED SELLs since the last FILLED BUY),
+    marking those symbols no-longer-held.  This is a **notional** resync —
+    no market orders are placed, the Trade ledger is left untouched, and
+    only the Position table is corrected so the exit-check and trading
+    cycles operate on accurate data instead of retrying phantom sells
+    every cycle.
+
+    Only Position rows for tracked assets are considered.  The decision
+    to remove is driven by ``_has_recent_sell_failures()`` — the same
+    evidence ``reconcile_positions()`` uses to classify a gap as
+    acknowledged infra-side drift rather than silent corruption.
+
+    Args:
+        symbols: Optional explicit ``SYMBOL/USDT`` list to resync.  When
+            ``None``, every tracked Position row with recent FAILED SELLs
+            is auto-detected and resynced.
+
+    Returns:
+        Dict mapping each resynced ``SYMBOL/USDT`` to its pre-resync
+        state: ``quantity``, ``avg_entry_price``, ``current_price``
+        (before deletion), ``resynced_price`` (live price used for the
+        audit), and ``exchange_balance`` (observed free+locked).
+    """
+    from src.data.binance_client import BinanceClient
+    from src.database.connection import get_db
+    from src.database.models import Position as PositionModel
+
+    binance = BinanceClient()
+    _TRACKED_ASSETS: set[str] = {
+        pair.split("/")[0] for pair in settings.TRADING_PAIRS
+    }
+    resynced: dict[str, dict[str, Any]] = {}
+
+    try:
+        account = binance._client.get_account()
+        balances: dict[str, float] = {}
+        for b in account.get("balances", []):
+            asset = b["asset"]
+            if asset not in _TRACKED_ASSETS:
+                continue
+            bal = float(b.get("free", 0)) + float(b.get("locked", 0))
+            if bal > 0.000001:
+                balances[asset] = bal
+    except Exception as exc:
+        msg = f"Failed to fetch Binance account balances during resync: {exc}"
+        _logger.error(msg)
+        send_alert(msg, level="error")
+        return resynced
+
+    with get_db() as db:
+        for pos in db.query(PositionModel).all():
+            pair = pos.symbol
+            asset = pair.split("/")[0]
+            if asset not in _TRACKED_ASSETS:
+                continue
+            if symbols is not None and pair not in symbols:
+                continue
+
+            if not _has_recent_sell_failures(pair):
+                _logger.info(
+                    "Position resync: %s has no recent FAILED SELL evidence — keeping row "
+                    "(qty=%s)",
+                    pair, pos.quantity,
+                )
+                continue
+
+            try:
+                live_price = binance.get_current_price(pair)
+            except Exception as exc:
+                _logger.error("Resync: failed to fetch live price for %s: %s", pair, exc)
+                live_price = pos.current_price
+
+            resynced[pair] = {
+                "quantity": float(pos.quantity),
+                "avg_entry_price": float(pos.avg_entry_price),
+                "current_price": float(pos.current_price),
+                "resynced_price": float(live_price),
+                "exchange_balance": balances.get(asset, 0.0),
+            }
+            pos.current_price = Decimal(str(live_price))
+            pos.updated_at = datetime.utcnow()
+            db.delete(pos)
+            _logger.warning(
+                "Position resynced per actual exchange balance — %s no-longer-held "
+                "(pre-resync qty=%.8f avg_entry=%.4f, live price=%.2f, exchange %s=%.8f). "
+                "No market order placed.",
+                pair,
+                resynced[pair]["quantity"],
+                resynced[pair]["avg_entry_price"],
+                resynced[pair]["resynced_price"],
+                asset,
+                resynced[pair]["exchange_balance"],
+            )
+
+    if not resynced:
+        _logger.info("Position resync: nothing to resync")
+    else:
+        _logger.warning(
+            "Position resync: %d stale position(s) removed — %s",
+            len(resynced),
+            ", ".join(sorted(resynced)),
+        )
+    return resynced
 
 
 def run_data_cache_refresh() -> None:

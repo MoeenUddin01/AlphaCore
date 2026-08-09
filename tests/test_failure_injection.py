@@ -948,3 +948,285 @@ class TestReconciliationDetectsT13Drift:
         )
         assert "SOL/USDT" in alert_text
         assert "MISSING" in alert_text
+
+    def test_exchange_below_ledger_flagged(self, test_db):
+        """Deliberate simulated live mismatch: exchange balance LOWER than
+        the trade-ledger expectation while the Position row is missing.
+
+        The rewrite must flag this.  The old one-directional check only
+        looked for shortfalls of the Position table against exchange
+        balances — it never compared the ledger against the exchange, so
+        an asset the ledger says we own (but the exchange cannot back)
+        would silently PASS.
+        """
+        from decimal import Decimal
+        from datetime import datetime
+
+        from src.database.connection import get_db
+        from src.database.models import Trade as TradeModel
+
+        now = datetime.utcnow()
+
+        # Ledger says we bought 2.0 SOL; no Position row; no failed sells
+        with get_db() as db:
+            db.add(TradeModel(
+                cycle_id="recon-shortfall",
+                symbol="SOL/USDT",
+                side="BUY",
+                proposed_quantity=Decimal("2.0"),
+                executed_quantity=Decimal("2.0"),
+                entry_price=Decimal("70"),
+                executed_price=Decimal("70"),
+                stop_loss_price=Decimal("0"),
+                take_profit_price=Decimal("999999"),
+                order_id="recon-shortfall-buy",
+                status="FILLED",
+                is_pre_fix_artifact=False,
+                created_at=now,
+            ))
+            db.flush()
+
+        # Exchange has only 1.0 of the 2.0 SOL the ledger expects
+        balances = [self._make_exchange_balance("SOL", 1.0)]
+
+        alert_text = self._run_reconciliation_with_mocks(balances)
+        assert alert_text is not None, (
+            "Expected alert: exchange balance below ledger expectation"
+        )
+        assert "LEDGER expects" in alert_text
+        assert "SOL/USDT" in alert_text
+        assert "shortfall=1.0" in alert_text.replace(" ", "")
+
+    def test_failed_sell_gap_not_reflagged(self, test_db):
+        """A missing Position row with repeated FAILED SELL evidence (the
+        -2010 infra-side drift) must NOT be re-flagged by reconciliation —
+        the bot already knows those coins are unsellable, and re-flagging
+        would auto-pause trading on every daily run."""
+        from decimal import Decimal
+        from datetime import datetime
+
+        from src.database.connection import get_db
+        from src.database.models import Trade as TradeModel
+
+        now = datetime.utcnow()
+
+        with get_db() as db:
+            db.add(TradeModel(
+                cycle_id="recon-ack",
+                symbol="SOL/USDT",
+                side="BUY",
+                proposed_quantity=Decimal("0.04"),
+                executed_quantity=Decimal("0.04"),
+                entry_price=Decimal("76.14"),
+                executed_price=Decimal("76.14"),
+                stop_loss_price=Decimal("0"),
+                take_profit_price=Decimal("999999"),
+                order_id="recon-ack-buy",
+                status="FILLED",
+                is_pre_fix_artifact=False,
+                created_at=now,
+            ))
+            db.add(TradeModel(
+                cycle_id="recon-ack",
+                symbol="SOL/USDT",
+                side="SELL",
+                proposed_quantity=Decimal("0.04"),
+                executed_quantity=Decimal("0"),
+                entry_price=Decimal("76.14"),
+                executed_price=Decimal("73.90"),
+                stop_loss_price=Decimal("0"),
+                take_profit_price=Decimal("999999"),
+                order_id="",
+                status="FAILED",
+                is_pre_fix_artifact=False,
+                created_at=now,
+            ))
+            db.flush()
+
+        # No Position row (stale), exchange has faucet SOL
+        balances = [self._make_exchange_balance("SOL", 6.0)]
+
+        alert_text = self._run_reconciliation_with_mocks(balances)
+        assert alert_text is None, (
+            "Known infra-side drift (FAILED sells) must not trigger a reconcile "
+            f"failure, got: {alert_text}"
+        )
+
+    def test_resync_removes_only_unsellable_positions(self, test_db):
+        """resync_positions_to_exchange() removes a Position row whose coins
+        are provably unsellable (FAILED SELLs since the last FILLED BUY) but
+        keeps healthy positions — no exchange orders, Trade ledger untouched."""
+        from decimal import Decimal
+        from datetime import datetime
+        import uuid
+
+        from src.database.connection import get_db
+        from src.database.models import Position, Trade as TradeModel
+
+        now = datetime.utcnow()
+
+        with get_db() as db:
+            # SOL: unsellable — FILLED BUY then FAILED SELLs
+            db.add(Position(
+                id=str(uuid.uuid4()),
+                symbol="SOL/USDT",
+                quantity=Decimal("0.04"),
+                avg_entry_price=Decimal("76.14"),
+                current_price=Decimal("74.00"),
+                unrealised_pnl=Decimal("-0.08"),
+                updated_at=now,
+            ))
+            db.add(TradeModel(
+                cycle_id="resync-sol",
+                symbol="SOL/USDT", side="BUY",
+                proposed_quantity=Decimal("0.04"), executed_quantity=Decimal("0.04"),
+                entry_price=Decimal("76.14"), executed_price=Decimal("76.14"),
+                stop_loss_price=Decimal("0"), take_profit_price=Decimal("999999"),
+                order_id="resync-sol-buy", status="FILLED",
+                is_pre_fix_artifact=False, created_at=now,
+            ))
+            db.add(TradeModel(
+                cycle_id="resync-sol",
+                symbol="SOL/USDT", side="SELL",
+                proposed_quantity=Decimal("0.04"), executed_quantity=Decimal("0"),
+                entry_price=Decimal("76.14"), executed_price=Decimal("73.90"),
+                stop_loss_price=Decimal("0"), take_profit_price=Decimal("999999"),
+                order_id="", status="FAILED",
+                is_pre_fix_artifact=False, created_at=now,
+            ))
+            # ETH: healthy — FILLED BUY, no FAILED SELLs
+            db.add(Position(
+                id=str(uuid.uuid4()),
+                symbol="ETH/USDT",
+                quantity=Decimal("0.1297"),
+                avg_entry_price=Decimal("1926.41"),
+                current_price=Decimal("1870.00"),
+                unrealised_pnl=Decimal("-7.30"),
+                updated_at=now,
+            ))
+            db.add(TradeModel(
+                cycle_id="resync-eth",
+                symbol="ETH/USDT", side="BUY",
+                proposed_quantity=Decimal("0.1297"), executed_quantity=Decimal("0.1297"),
+                entry_price=Decimal("1926.41"), executed_price=Decimal("1926.41"),
+                stop_loss_price=Decimal("0"), take_profit_price=Decimal("999999"),
+                order_id="resync-eth-buy", status="FILLED",
+                is_pre_fix_artifact=False, created_at=now,
+            ))
+            db.flush()
+
+        from src.scheduler.jobs import resync_positions_to_exchange
+
+        mock_binance_instance = MagicMock()
+        mock_binance_instance._client.get_account.return_value = {
+            "balances": [
+                {"asset": "SOL", "free": "6.0", "locked": "0.0"},
+                {"asset": "ETH", "free": "1.0", "locked": "0.0"},
+            ]
+        }
+        mock_binance_instance.get_current_price.return_value = Decimal("73.90")
+
+        with patch("src.data.binance_client.BinanceClient", return_value=mock_binance_instance):
+            result = resync_positions_to_exchange(["SOL/USDT", "ETH/USDT"])
+
+        assert "SOL/USDT" in result, "Unsellable SOL position must be resynced"
+        assert "ETH/USDT" not in result, "Healthy ETH position must be kept"
+        assert result["SOL/USDT"]["quantity"] == 0.04
+
+        with get_db() as db:
+            assert db.query(Position).filter(Position.symbol == "SOL/USDT").first() is None
+            assert db.query(Position).filter(Position.symbol == "ETH/USDT").first() is not None
+            # Trade ledger untouched (3 trades: SOL buy, SOL failed sell, ETH buy)
+            assert db.query(TradeModel).count() == 3
+
+    def test_fresh_healthy_position_not_flagged(self, test_db):
+        """A legitimately healthy, freshly-opened position must report CLEAN
+        — no alert, even when the symbol's ledger net is NEGATIVE due to
+        historical seed-position drift (the BTC/BNB/ADA case in production).
+
+        Regression guard for the false positive that would otherwise fire
+        the phantom-position check and auto-pause trading."""
+        from decimal import Decimal
+        from datetime import datetime
+        import uuid
+
+        from src.database.connection import get_db
+        from src.database.models import Position, Trade as TradeModel
+
+        now = datetime.utcnow()
+
+        with get_db() as db:
+            # BTC ledger is negative: an old seed SELL exists outside the
+            # Trade table, plus a fresh BUY that just opened the position.
+            db.add(TradeModel(
+                cycle_id="recon-fresh-btc",
+                symbol="BTC/USDT", side="SELL",
+                proposed_quantity=Decimal("0.0100"), executed_quantity=Decimal("0.0100"),
+                entry_price=Decimal("60000"), executed_price=Decimal("60000"),
+                stop_loss_price=Decimal("0"), take_profit_price=Decimal("999999"),
+                order_id="recon-fresh-seed-sell", status="FILLED",
+                is_pre_fix_artifact=False, created_at=now,
+            ))
+            db.add(TradeModel(
+                cycle_id="recon-fresh-btc",
+                symbol="BTC/USDT", side="BUY",
+                proposed_quantity=Decimal("0.0050"), executed_quantity=Decimal("0.0050"),
+                entry_price=Decimal("64000"), executed_price=Decimal("64000"),
+                stop_loss_price=Decimal("0"), take_profit_price=Decimal("999999"),
+                order_id="recon-fresh-buy", status="FILLED",
+                is_pre_fix_artifact=False, created_at=now,
+            ))
+            # Fresh position row matching the buy (ledger net is -0.005)
+            db.add(Position(
+                id=str(uuid.uuid4()),
+                symbol="BTC/USDT",
+                quantity=Decimal("0.0050"),
+                avg_entry_price=Decimal("64000"),
+                current_price=Decimal("64100"),
+                unrealised_pnl=Decimal("0.5"),
+                updated_at=now,
+            ))
+            db.flush()
+
+        # Exchange holds the coins (faucet + the fresh fill)
+        balances = [self._make_exchange_balance("BTC", 1.0)]
+
+        alert_text = self._run_reconciliation_with_mocks(balances)
+        assert alert_text is None, (
+            "Fresh healthy position must not trigger a reconcile failure, "
+            f"got: {alert_text}"
+        )
+
+    def test_true_phantom_position_flagged(self, test_db):
+        """A position row that exists nowhere — no trades, no exchange
+        balance — must still be flagged as a phantom."""
+        from decimal import Decimal
+        from datetime import datetime
+        import uuid
+
+        from src.database.connection import get_db
+        from src.database.models import Position
+
+        now = datetime.utcnow()
+
+        with get_db() as db:
+            db.add(Position(
+                id=str(uuid.uuid4()),
+                symbol="BTC/USDT",
+                quantity=Decimal("0.0050"),
+                avg_entry_price=Decimal("64000"),
+                current_price=Decimal("64100"),
+                unrealised_pnl=Decimal("0.5"),
+                updated_at=now,
+            ))
+            db.flush()
+
+        # No trades at all; exchange has no BTC balance
+        balances = [self._make_exchange_balance("BTC", 0.0)]
+
+        alert_text = self._run_reconciliation_with_mocks(balances)
+        assert alert_text is not None, (
+            "Position with no ledger and no exchange backing must be flagged"
+        )
+        assert "Phantom position" in alert_text
+        assert "BTC/USDT" in alert_text
