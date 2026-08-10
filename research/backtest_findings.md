@@ -584,6 +584,178 @@ rates sit below their own break-even — none crosses the profitability line.
 
 ---
 
+## 11. Pairs trading — screening result (null)
+
+A new strategy family, tested separately from Sections 1–10. Hypothesis: a
+statistically cointegrated pair's spread mean-reverts, so buying the
+momentarily "cheap" leg and exiting on reversion produces a market-neutral
+edge without relying on single-asset direction. Because live trading is spot
+long-only, any eventual implementation would be a **long-only rotation** toward
+the cheap coin (the rich leg is never shorted).
+
+### 11.1 Method (honest, pre-registered)
+
+1. Full 2-year hourly window (Aug 2024 → Aug 2026, 17,532 candles/pair — the
+   same cache used for Sections 9–10) for BTC, ETH, SOL, BNB, ADA.
+2. Log-return **correlation matrix** over the full window.
+3. **Engle-Granger cointegration** (statsmodels `coint`, trend='c', AIC lag
+   selection) for all 10 unordered pairs. A pair is a candidate only if the EG
+   p-value < 0.05 **and** the correlation is economically sensible.
+4. Spread **half-life** from an AR(1) fit on the OLS residual — an estimate of
+   how fast the spread actually reverts (hours).
+
+Pre-commit: if **zero** pairs pass, the backtest is **not** run — no
+noise-fitting on non-cointegrated pairs. This was the outcome below.
+
+### 11.2 Results
+
+Correlation of log returns (full window) is uniformly high (0.68–0.82), which
+often gets mistaken for "the pairs will revert". It does not mean that:
+
+```
+       BTC    ETH    SOL    BNB    ADA
+BTC   1.000  0.819  0.775  0.709  0.707
+ETH   0.819  1.000  0.794  0.738  0.742
+SOL   0.775  0.794  1.000  0.700  0.744
+BNB   0.709  0.738  0.700  1.000  0.680
+ADA   0.707  0.742  0.744  0.680  1.000
+```
+
+Engle-Granger cointegration, all 10 pairs (EG t / p / criticals 1%, 5%, 10%):
+
+| Pair | r(ret) | EG t | EG p | 1% | 5% | 10% | Half-life (h) | Pass? |
+|---|---|---|---|---|---|---|---|---|
+| BTC/ETH | 0.819 | −2.17 | 0.438 | −3.90 | −3.34 | −3.04 | 2,438 | No |
+| BTC/SOL | 0.775 | −2.74 | 0.186 | −3.90 | −3.34 | −3.04 | 2,187 | No |
+| BTC/BNB | 0.709 | −1.22 | 0.853 | −3.90 | −3.34 | −3.04 | 1,661 | No |
+| BTC/ADA | 0.707 | −2.60 | 0.235 | −3.90 | −3.34 | −3.04 | 2,000 | No |
+| ETH/SOL | 0.794 | −1.74 | 0.659 | −3.90 | −3.34 | −3.04 | 2,943 | No |
+| ETH/BNB | 0.738 | −1.92 | 0.569 | −3.90 | −3.34 | −3.04 | 1,207 | No |
+| ETH/ADA | 0.742 | −1.64 | 0.704 | −3.90 | −3.34 | −3.04 | 5,990 | No |
+| SOL/BNB | 0.700 | −1.00 | 0.903 | −3.90 | −3.34 | −3.04 | 1,554 | No |
+| SOL/ADA | 0.744 | −2.67 | 0.209 | −3.90 | −3.34 | −3.04 | 1,117 | No |
+| BNB/ADA | 0.680 | −2.13 | 0.461 | −3.90 | −3.34 | −3.04 | 13,138 | No |
+
+**Best** EG stat is BTC/SOL at t=−2.74 (p=0.186) — not even close to the 10%
+critical value (−3.04). **Zero of 10 pairs pass.**
+
+### 11.3 Interpretation
+
+1. **High correlation ≠ cointegration.** All 10 pairs correlate 0.68–0.82 in
+   returns yet *none* share a stable cointegrating vector over 2 years. The
+   ratios/spreads are non-stationary random walks — there is no attractor to
+   revert to.
+2. **Half-lives confirm it.** Even the "most mean-reverting" spreads have
+   AR(1) half-lives of 1,117–13,138 hours (1.5 months → 1.5 years). A spread
+   that takes months-to-years to revert is not a pairs-trading signal on an
+   hourly horizon; position capital would sit in a non-reverting trade for
+   weeks, paying fees, for no expected edge.
+3. **Correlation is rising, not stable.** First-vs-second-half deltas are
+   uniformly positive (+0.04 to +0.10), i.e. correlations are *increasing*
+   through 2026. Co-movement growth without cointegration is a feature of a
+   high-beta bull market, not of a tradeable statistical relationship.
+4. **No backtest was run.** Per the pre-registered rule, no spread/z-score
+   strategy was fitted to non-cointegrated pairs — doing so would be the exact
+   noise-fitting Sections 1–10 warn about.
+
+### 11.4 Bottom line
+
+Pairs trading is the **fifth and final approach tested** (vol classifier,
+direction LSTM, sentiment, EMA/RSI technicals, and now relative-value spread
+reversion), and it joins the prior four: **no statistically credible edge**.
+The null is clean — the screen failed at the first gate, before any strategy
+parameter could be fit. If a relative-value angle were ever pursued again it
+would require either (a) exchange-listed *perpetual future* pairs (spot
+long-only cannot capture the full pair), (b) a shorter-window rolling
+cointegration that demonstrably holds out-of-sample, or (c) a genuinely
+different data source — none of which changes today's finding on spot hourly
+data.
+
+## 12. Order-flow imbalance (taker buy/sell ratio) — predictive check (null)
+
+A free, already-accessible data source tested as a sixth approach: Binance's
+raw kline payload includes `taker_buy_base_asset_volume` and
+`taker_buy_quote_asset_volume` (array fields 9/10), which separate
+buyer-initiated from seller-initiated volume. The hypothesis: heavy
+buyer-initiated flow in one period predicts positive returns in the next.
+
+### 12.1 Data availability (step 1)
+
+The existing 2-year cache (`full2/*.csv`) and `src/data/binance_client.py`
+store only kline fields 0–5 (`timestamp, open, high, low, close, volume`);
+the taker fields were **not** stored. They were re-fetched for this section
+from Binance's public read-only endpoint for all 5 pairs over the exact
+same 2-year window as Sections 9–11 (Aug 2024 → Aug 2026, 17,532 hourly
+candles/pair), then merged onto the existing cache by timestamp — **100%
+coverage, zero missing**. The base and quote taker-ratio definitions agree
+at r = 1.0000, confirming the fetched fields are clean.
+
+### 12.2 Taker buy ratio sanity
+
+`ratio = taker_buy_base_volume / volume`, per hourly candle:
+
+| Pair | Mean | Std | > 0.6 (% candles) | < 0.4 (% candles) |
+|---|---|---|---|---|
+| BTC | 0.486 | 0.081 | 7.4 | 13.9 |
+| ETH | 0.493 | 0.070 | 5.9 | 8.8 |
+| SOL | 0.498 | 0.074 | 7.6 | 9.1 |
+| BNB | 0.502 | 0.079 | 10.7 | 9.7 |
+| ADA | 0.490 | 0.071 | 6.0 | 9.8 |
+
+Ratio hovers ~0.49–0.50 with the 0.6/0.4 thresholds catching ~6–14% of
+candles each — informative enough to have shown a signal if one existed.
+
+### 12.3 Predictive check: `ratio_t → ret_{t+1}` (step 2, pre-strategy)
+
+Pearson / Spearman correlation between the taker buy ratio of candle `t`
+and the log return of candle `t+1` (n ≈ 17,531/pair):
+
+| Pair | Pearson r | p | Spearman | p |
+|---|---|---|---|---|
+| BTC | −0.0153 | 0.042 | −0.0357 | 2.2e-6 |
+| ETH | +0.0006 | 0.933 | −0.0307 | 4.8e-5 |
+| SOL | −0.0143 | 0.058 | −0.0303 | 6.0e-5 |
+| BNB | +0.0012 | 0.877 | −0.0245 | 1.2e-3 |
+| ADA | −0.0106 | 0.162 | −0.0302 | 6.4e-5 |
+| POOLED | −0.0077 | 0.023 | −0.0293 | 4.0e-18 |
+
+- **Magnitude is negligible:** mean per-pair |r| ≈ 0.008; pooled r² ≈ 0.006%.
+  At n ≈ 87.7k the pooled p is "significant" purely as a sample-size
+  artefact — the effect size is economically zero.
+- **Direction is inconsistent:** BTC/SOL/ADA correlate slightly *negative*,
+  ETH/BNB ≈ 0. There is no pair-consistent sign.
+- **Spearman hints contrarian, not momentum:** if anything, heavy buying
+  precedes marginally *lower* next-hour returns (−0.02 to −0.04) — the
+  opposite of the hypothesis, and still ~zero variance explained.
+
+### 12.4 Conditional check: mean next-hour return after `ratio>0.6` vs `<0.4`
+
+| Pair | n >0.6 | mean % | n <0.4 | mean % | diff (bp) | t | p |
+|---|---|---|---|---|---|---|---|
+| BTC | 1,305 | −0.027 | 2,428 | +0.010 | −3.7 | −2.59 | 0.010 |
+| ETH | 1,030 | −0.021 | 1,538 | −0.008 | −1.3 | −0.57 | 0.566 |
+| SOL | 1,337 | −0.022 | 1,590 | +0.027 | −4.9 | −1.86 | 0.062 |
+| BNB | 1,872 | +0.008 | 1,702 | −0.017 | **+2.5** | +1.45 | 0.146 |
+| ADA | 1,047 | −0.040 | 1,719 | +0.006 | −4.6 | −1.57 | 0.117 |
+
+Effects are 1–5 bp and **sign-flip across pairs** (BNB is positive, the rest
+negative). The only nominally significant result (BTC, p=0.010) is in the
+*contrarian* direction and does not survive multiple-comparison correction.
+Any real effect here is 4–20× smaller than the 20 bp round-trip fee — dead on
+arrival even if it were consistent.
+
+### 12.5 Bottom line
+
+Per the pre-registered rule, **no strategy was built or backtested** — the
+predictive gate failed before any trading rule could be fitted. Order-flow
+imbalance joins the other five approaches (vol classifier, direction LSTM,
+sentiment, EMA/RSI technicals, pairs cointegration) as a **sixth negative
+result**: the data is real, free, and clean, but heavy taker-buy flow does
+not predict next-hour returns with any economically meaningful, directionally
+consistent edge.
+
+---
+
 ## Appendix — Reproduction commands
 
 ```bash
@@ -598,6 +770,15 @@ PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/regime.py
 
 # Regenerate the exit-structure variants (Section 10):
 PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/exits.py
+
+# Regenerate the pairs-trading screen (Section 11):
+PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/pairs_screen.py
+
+# Re-fetch taker buy/sell volume for the 2-year window (Section 12):
+PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/fetch_flow.py
+
+# Regenerate the order-flow predictive check (Section 12):
+PYTHONPATH=. .venv/bin/python /tmp/opencode/bt/flow_check.py
 
 # Retrain metrics source:
 cat backups/artifacts_20260802/metrics_*_lstm.json        # direction
